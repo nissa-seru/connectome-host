@@ -43,6 +43,7 @@ import {
   resolveOverlayEntry,
   serverProvisions,
   lostByReplacement,
+  composeMcplChildEnv,
   overlayEntryProblem,
   overlayEntryReplaces,
   overlayEntryTombstones,
@@ -414,6 +415,11 @@ export class McplAdminModule implements Module {
     if (Array.isArray(input.enabledTools) && input.enabledTools.length) entry.enabledTools = input.enabledTools.map(String);
     if (Array.isArray(input.disabledTools) && input.disabledTools.length) entry.disabledTools = input.disabledTools.map(String);
 
+    // Never write an entry the boot would skip (overlayEntryProblem): what
+    // loads now must be what loads at the next start.
+    const problem = overlayEntryProblem(entry);
+    if (problem) return fail(`mcpl_deploy refused: the entry would be malformed (${problem}), so nothing was saved.`);
+
     // Persist to the overlay first — a connect failure still leaves the entry
     // in place so the agent can fix the server and mcpl_restart it.
     const overlay = readAgentOverlay(this.overlayPath);
@@ -421,7 +427,10 @@ export class McplAdminModule implements Module {
     saveAgentOverlay(this.overlayPath, overlay);
 
     const config = resolveOverlayEntry(id, entry, this.overlayPath) as unknown as McplServerConfig;
-    config.env = { ...(config.env ?? {}), AGENT_TIMEZONE: this.timeZone };
+    // The child's env as the boot composes it for every server
+    // (composeMcplChildEnv): the refusal-reaction baseline as a default the
+    // entry's own env overrides, and the host's AGENT_TIMEZONE over it.
+    config.env = composeMcplChildEnv(config.env as Record<string, string> | undefined, this.timeZone);
     if (entry.access && this.identity) {
       const identity = this.identity;
       const audience = entry.access;
@@ -504,8 +513,10 @@ export class McplAdminModule implements Module {
       return fail(`Server "${id}" is not loaded and not in your overlay.`);
     }
 
-    await framework.disconnectMcplServer(id);
-
+    // The overlay is read, changed and saved with no await between, before
+    // the disconnect: a write landing while the server disconnects (another
+    // deploy, say) is never overwritten by a stale copy, and an unload asked
+    // to persist is recorded even if the disconnect fails.
     let persistNote = 'Session-only: it will load again on the next host restart.';
     if (persist) {
       if (overlayEntryReplaces(overlay[id])) {
@@ -524,6 +535,14 @@ export class McplAdminModule implements Module {
       saveAgentOverlay(this.overlayPath, overlay);
     }
 
+    try {
+      await framework.disconnectMcplServer(id);
+    } catch (error) {
+      return fail(
+        `Server "${id}" couldn't be disconnected: ${error instanceof Error ? error.message : String(error)}. ` +
+        `It may still be loaded in this session. ${persistNote}`,
+      );
+    }
     return ok(`Unloaded server "${id}" — its tools are gone from your toolset. ${persistNote}`);
   }
 }
