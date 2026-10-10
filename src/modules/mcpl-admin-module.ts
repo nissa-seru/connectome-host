@@ -389,7 +389,15 @@ export class McplAdminModule implements Module {
     if (command) entry.command = command;
     if (url) { entry.url = url; entry.transport = 'websocket'; }
     if (Array.isArray(input.args)) entry.args = input.args.map(String);
-    if (input.env && typeof input.env === 'object') entry.env = input.env as Record<string, string>;
+    // An env is taken whenever one is given (null is how strict callers say
+    // "unspecified"): numbers and booleans become their text, as args are
+    // coerced, and anything else is left for overlayEntryProblem to refuse.
+    if (input.env !== undefined && input.env !== null) {
+      entry.env = (typeof input.env === 'object' && !Array.isArray(input.env)
+        ? Object.fromEntries(Object.entries(input.env as Record<string, unknown>).map(([k, v]) =>
+            [k, typeof v === 'number' || typeof v === 'boolean' ? String(v) : v]))
+        : input.env) as Record<string, string>;
+    }
     if (typeof input.token === 'string') entry.token = input.token;
     if (typeof input.access === 'string' && input.access.trim()) {
       if (!this.identity) {
@@ -509,41 +517,56 @@ export class McplAdminModule implements Module {
 
     const known = framework.listMcplServers().some(s => s.id === id);
     const overlay = readAgentOverlay(this.overlayPath);
-    if (!known && !(id in overlay)) {
+    if (!known && !Object.hasOwn(overlay, id)) {
       return fail(`Server "${id}" is not loaded and not in your overlay.`);
     }
 
-    // The overlay is read, changed and saved with no await between, before
-    // the disconnect: a write landing while the server disconnects (another
-    // deploy, say) is never overwritten by a stale copy, and an unload asked
-    // to persist is recorded even if the disconnect fails.
+    // Every overlay change is read, changed and saved with nothing awaited
+    // between, so a write landing while the server disconnects (another
+    // deploy, say) is never overwritten by a stale copy.
+    // - A tombstone is saved before the disconnect: an unload asked to
+    //   persist is recorded even if the disconnect fails, and a retry writes
+    //   the same tombstone again.
+    // - An agent-deployed entry is removed only once its server is gone
+    //   (read again after the disconnect). Removed first, a failed
+    //   disconnect would leave the server running with no entry, and a retry
+    //   would take it for the operator's and tombstone that over it
+    //   (Nell-1783's haiku probe; this shape is one of its patches).
+    const agentEntry = persist && overlayEntryReplaces(overlay[id]);
     let persistNote = 'Session-only: it will load again on the next host restart.';
-    if (persist) {
-      if (overlayEntryReplaces(overlay[id])) {
-        // Agent-deployed server: forget it entirely. If it replaced the
-        // operator's definition, that definition is what the next start loads.
-        const replaced = this.replacement(id, overlay) !== null;
-        delete overlay[id];
-        persistNote = replaced
-          ? `Removed from your agent overlay; the operator's definition of "${id}" loads again at the next host start.`
-          : 'Removed from your agent overlay.';
-      } else {
-        // Recipe/file server: tombstone it so it stays unloaded across restarts.
-        overlay[id] = { disabled: true };
-        persistNote = 'Tombstoned in your overlay — it stays unloaded across host restarts; redeploy with mcpl_deploy to restore.';
-      }
+    if (persist && !agentEntry) {
+      overlay[id] = { disabled: true };
       saveAgentOverlay(this.overlayPath, overlay);
+      persistNote = 'Tombstoned in your overlay — it stays unloaded across host restarts; redeploy with mcpl_deploy to restore.';
+    } else if (agentEntry) {
+      persistNote = `Kept in your agent overlay, so it loads at the next host start; mcpl_unload "${id}" again removes it.`;
     }
 
-    try {
-      await framework.disconnectMcplServer(id);
-    } catch (error) {
-      return fail(
-        `Server "${id}" couldn't be disconnected: ${error instanceof Error ? error.message : String(error)}. ` +
-        `It may still be loaded in this session. ${persistNote}`,
-      );
+    // Only a listed server is disconnected: an id the overlay alone names
+    // has nothing loaded.
+    if (known) {
+      try {
+        await framework.disconnectMcplServer(id);
+      } catch (error) {
+        return fail(
+          `Server "${id}" couldn't be disconnected: ${error instanceof Error ? error.message : String(error)}. ` +
+          `It may still be loaded in this session. ${persistNote}`,
+        );
+      }
     }
-    return ok(`Unloaded server "${id}" — its tools are gone from your toolset. ${persistNote}`);
+
+    if (agentEntry) {
+      const current = readAgentOverlay(this.overlayPath);
+      const replaced = this.replacement(id, current) !== null;
+      delete current[id];
+      saveAgentOverlay(this.overlayPath, current);
+      persistNote = replaced
+        ? `Removed from your agent overlay; the operator's definition of "${id}" loads again at the next host start.`
+        : 'Removed from your agent overlay.';
+    }
+    return ok(known
+      ? `Unloaded server "${id}" — its tools are gone from your toolset. ${persistNote}`
+      : `Server "${id}" wasn't loaded in this session. ${persistNote}`);
   }
 }
 

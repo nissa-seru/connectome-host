@@ -213,7 +213,12 @@ export interface AgentOverlayFile {
  * the file, which can hold credentials.
  */
 export function readAgentOverlay(overlayPath: string): Record<string, AgentOverlayEntry> {
-  if (!existsSync(overlayPath)) return {};
+  // Keyed by the agent's own ids, so the map has no prototype: on a plain
+  // object `overlay['__proto__'] = entry` sets the prototype instead of
+  // adding an entry, and `id in overlay` finds inherited names such as
+  // `toString` (Nell-1783's haiku probe; this shape is one of its patches).
+  const overlay: Record<string, AgentOverlayEntry> = Object.create(null);
+  if (!existsSync(overlayPath)) return overlay;
   const raw = readFileSync(overlayPath, 'utf-8');
   let parsed: unknown;
   try {
@@ -225,11 +230,11 @@ export function readAgentOverlay(overlayPath: string): Record<string, AgentOverl
     throw new Error(`the agent overlay ${overlayPath} isn't an object with mcplServers: fix it, or move it aside`);
   }
   const servers = (parsed as { mcplServers?: unknown }).mcplServers;
-  if (servers === undefined) return {};
+  if (servers === undefined) return overlay;
   if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) {
     throw new Error(`the agent overlay ${overlayPath} has an mcplServers that isn't a map of entries by id: fix it, or move it aside`);
   }
-  return servers as Record<string, AgentOverlayEntry>;
+  return Object.assign(overlay, servers as Record<string, AgentOverlayEntry>);
 }
 
 /**

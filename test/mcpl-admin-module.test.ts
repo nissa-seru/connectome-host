@@ -105,10 +105,11 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function makeModule(framework: AgentFramework) {
+function makeModule(framework: AgentFramework, timeZone?: string) {
   const mod = new McplAdminModule({
     overlayPath,
     configPath: join(dir, 'mcpl-servers.json'),
+    ...(timeZone !== undefined ? { timeZone } : {}),
   });
   mod.setFramework(framework);
   return mod;
@@ -161,7 +162,7 @@ describe('mcpl_deploy', () => {
     const connect = (stub as unknown as { connectMcplServer: (c: { id: string; env?: Record<string, string> }) => Promise<void> }).connectMcplServer;
     (stub as unknown as { connectMcplServer: (c: { id: string; env?: Record<string, string> }) => Promise<void> }).connectMcplServer =
       async (c) => { configs.push(c); return connect(c); };
-    const mod = makeModule(stub);
+    const mod = makeModule(stub, 'Pacific/Auckland');
 
     await call(mod, 'mcpl_deploy', { id: 'chat', command: 'node', env: { TOKEN: 'mine' } });
     await call(mod, 'mcpl_deploy', { id: 'quiet', command: 'node', env: { DISCORD_SUPPRESSED_REACTIONS_BASELINE: 'own', AGENT_TIMEZONE: 'Mars/Olympus' } });
@@ -169,12 +170,11 @@ describe('mcpl_deploy', () => {
     expect(configs[0]!.env).toEqual({
       DISCORD_SUPPRESSED_REACTIONS_BASELINE: REFUSAL_REACTION_BASELINE.join(','),
       TOKEN: 'mine',
-      AGENT_TIMEZONE: configs[0]!.env!.AGENT_TIMEZONE!,
+      AGENT_TIMEZONE: 'Pacific/Auckland',
     });
-    expect(configs[0]!.env!.AGENT_TIMEZONE).toBeTruthy();
     // The entry's own baseline overrides the default; the host's zone wins over the entry's.
     expect(configs[1]!.env!.DISCORD_SUPPRESSED_REACTIONS_BASELINE).toBe('own');
-    expect(configs[1]!.env!.AGENT_TIMEZONE).toBe(configs[0]!.env!.AGENT_TIMEZONE);
+    expect(configs[1]!.env!.AGENT_TIMEZONE).toBe('Pacific/Auckland');
     // The overlay keeps only what the agent gave.
     expect(readAgentOverlay(overlayPath).chat).toEqual({ command: 'node', env: { TOKEN: 'mine' } });
   });
@@ -183,13 +183,36 @@ describe('mcpl_deploy', () => {
     const { stub, calls } = makeStubFramework();
     const mod = makeModule(stub);
 
-    for (const env of [{ PORT: 3101 }, ['A=1']]) {
+    for (const env of [['A=1'], 'TOKEN=x', 5, false, { NESTED: { a: 1 } }, { GONE: null }]) {
       const result = await call(mod, 'mcpl_deploy', { id: 'odd', command: 'node', env });
       expect(result.success).toBe(false);
       expect(result.error).toStartWith('mcpl_deploy refused: the entry would be malformed (its env isn\'t a map of text), so nothing was saved.');
     }
     expect(calls).toEqual([]);
     expect(readAgentOverlay(overlayPath).odd).toBeUndefined();
+  });
+
+  test('takes numbers and booleans in env as their text, as args are, and null as no env', async () => {
+    const { stub } = makeStubFramework();
+    const mod = makeModule(stub);
+
+    expect((await call(mod, 'mcpl_deploy', { id: 'port', command: 'node', env: { PORT: 3101, DEBUG: true } })).success).toBe(true);
+    expect(readAgentOverlay(overlayPath).port).toEqual({ command: 'node', env: { PORT: '3101', DEBUG: 'true' } });
+    expect((await call(mod, 'mcpl_deploy', { id: 'plain', command: 'node', env: null })).success).toBe(true);
+    expect(readAgentOverlay(overlayPath).plain).toEqual({ command: 'node' });
+  });
+
+  test("an id named like an object's own machinery is just an id", async () => {
+    const { stub } = makeStubFramework();
+    const mod = makeModule(stub);
+
+    const result = await call(mod, 'mcpl_deploy', { id: '__proto__', command: 'node' });
+    expect(result.success).toBe(true);
+    expect(Object.hasOwn(readAgentOverlay(overlayPath), '__proto__')).toBe(true);
+    expect(readAgentOverlay(overlayPath)['__proto__']).toEqual({ command: 'node' });
+    // An inherited name isn't in the overlay, so there's nothing to unload.
+    const unload = await call(mod, 'mcpl_unload', { id: 'toString' });
+    expect(unload.error).toBe('Server "toString" is not loaded and not in your overlay.');
   });
 
   test('connect failure keeps the overlay entry and reports the error', async () => {
@@ -249,6 +272,52 @@ describe('mcpl_unload', () => {
     expect((await call(mod, 'mcpl_unload', { id: 'mytool' })).success).toBe(true);
 
     expect(readAgentOverlay(overlayPath)).toEqual({ other: { command: 'bun' } });
+  });
+
+  test("a replacement whose disconnect fails keeps its entry, so a retry removes it and never tombstones the operator's server", async () => {
+    const { stub } = makeStubFramework();
+    const mod = makeModule(stub);
+    mod.setOperatorServers([{ id: 'shell', command: 'node' }]);
+    await call(mod, 'mcpl_deploy', { id: 'shell', command: 'bun' });
+    const disconnect = (stub as unknown as { disconnectMcplServer: (id: string) => Promise<void> }).disconnectMcplServer;
+    (stub as unknown as { disconnectMcplServer: () => Promise<void> }).disconnectMcplServer =
+      async () => { throw new Error('stuck'); };
+
+    const failed = await call(mod, 'mcpl_unload', { id: 'shell' });
+    expect(failed.error).toBe('Server "shell" couldn\'t be disconnected: stuck. It may still be loaded in this session. Kept in your agent overlay, so it loads at the next host start; mcpl_unload "shell" again removes it.');
+    expect(readAgentOverlay(overlayPath).shell).toEqual({ command: 'bun' });
+
+    (stub as unknown as { disconnectMcplServer: (id: string) => Promise<void> }).disconnectMcplServer = disconnect;
+    const retried = await call(mod, 'mcpl_unload', { id: 'shell' });
+    expect(retried.data).toBe('Unloaded server "shell" — its tools are gone from your toolset. Removed from your agent overlay; the operator\'s definition of "shell" loads again at the next host start.');
+    expect(Object.hasOwn(readAgentOverlay(overlayPath), 'shell')).toBe(false);
+  });
+
+  test('an id the overlay alone names has nothing to disconnect', async () => {
+    const { stub, calls } = makeStubFramework();
+    (stub as unknown as { disconnectMcplServer: () => Promise<void> }).disconnectMcplServer =
+      async () => { throw new Error('MCPL subsystem is not initialized'); };
+    saveAgentOverlay(overlayPath, { stale: { command: 'node' }, gone: { disabled: true } });
+    const mod = makeModule(stub);
+
+    expect((await call(mod, 'mcpl_unload', { id: 'stale' })).data).toBe('Server "stale" wasn\'t loaded in this session. Removed from your agent overlay.');
+    expect((await call(mod, 'mcpl_unload', { id: 'gone' })).data).toBe('Server "gone" wasn\'t loaded in this session. Tombstoned in your overlay — it stays unloaded across host restarts; redeploy with mcpl_deploy to restore.');
+    expect(calls).toEqual([]);
+    expect(readAgentOverlay(overlayPath)).toEqual({ gone: { disabled: true } });
+  });
+
+  test('a session-only unload whose disconnect fails, and a failure that isn\'t an Error, say so', async () => {
+    const { stub } = makeStubFramework();
+    await (stub as unknown as { connectMcplServer: (c: { id: string; command: string }) => Promise<void> })
+      .connectMcplServer({ id: 'discord', command: 'node' });
+    (stub as unknown as { disconnectMcplServer: () => Promise<void> }).disconnectMcplServer =
+      async () => { throw 'socket wedged'; };
+    const mod = makeModule(stub);
+
+    const result = await call(mod, 'mcpl_unload', { id: 'discord', persist: false });
+
+    expect(result.error).toBe('Server "discord" couldn\'t be disconnected: socket wedged. It may still be loaded in this session. Session-only: it will load again on the next host restart.');
+    expect(readAgentOverlay(overlayPath)).toEqual({});
   });
 
   test('an unload asked to persist is recorded even when the disconnect fails, and the receipt says so', async () => {
