@@ -361,7 +361,7 @@ describe('mcpl_unload', () => {
 
     const result = await call(mod, 'mcpl_unload', { id: 'mytool' });
 
-    expect(result.data).toBe('Unloaded server "mytool" — its tools are gone from your toolset. Your overlay entry for it changed while it disconnected (a deploy?), so it was left as it is now. At the next host start, your overlay entry loads it again.');
+    expect(result.data).toBe('Disconnected the server that was loaded as "mytool". Your overlay entry for it changed while it disconnected (a deploy?), so it was left as it is now. At the next host start, your overlay entry loads it again.');
     expect(readAgentOverlay(overlayPath).mytool).toEqual({ command: 'bun' });
   });
 

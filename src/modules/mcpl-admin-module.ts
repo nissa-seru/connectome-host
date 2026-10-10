@@ -573,9 +573,15 @@ export class McplAdminModule implements Module {
       }
     }
 
+    let head = known
+      ? `Unloaded server "${id}" — its tools are gone from your toolset.`
+      : `Server "${id}" wasn't loaded in this session.`;
     if (agentEntry) {
       const current = readAgentOverlay(this.overlayPath);
       if (JSON.stringify(current[id] ?? null) !== readEntry) {
+        // The deploy that landed has connected its own server under this id,
+        // whose tools may well be there: say only what this call did.
+        head = `Disconnected the server that was loaded as "${id}".`;
         persistNote = 'Your overlay entry for it changed while it disconnected (a deploy?), so it was left as it is now. ' + this.sessionOnlyNote(id, current, 'next');
       } else {
         const replaced = this.replacement(id, current) !== null;
@@ -586,9 +592,7 @@ export class McplAdminModule implements Module {
           : 'Removed from your agent overlay.';
       }
     }
-    return ok(known
-      ? `Unloaded server "${id}" — its tools are gone from your toolset. ${persistNote}`
-      : `Server "${id}" wasn't loaded in this session. ${persistNote}`);
+    return ok(`${head} ${persistNote}`);
   }
 }
 
