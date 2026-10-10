@@ -509,6 +509,19 @@ export class McplAdminModule implements Module {
     return ok(`Restarted server "${id}" — connected, ${status.toolCount} tools.${note}`);
   }
 
+  /** What loads at the next host start for an id whose overlay entry this
+   *  call leaves as `overlay` has it: the session-only note, read from the
+   *  overlay rather than assumed (Ada-1017's review: a tombstone saved by an
+   *  earlier unload keeps it unloaded). */
+  private sessionOnlyNote(id: string, overlay: Record<string, AgentOverlayEntry>, lead: 'session' | 'next' = 'session'): string {
+    const head = lead === 'session' ? 'Session-only: ' : 'At the next host start, ';
+    const entry = overlay[id];
+    if (overlayEntryTombstones(entry)) return `${head}your overlay tombstones it, so it stays unloaded across host restarts.`;
+    if (overlayEntryReplaces(entry)) return `${head}your overlay entry loads it again.`;
+    if (this.operatorServers.has(id)) return `${head}the operator's definition loads it again.`;
+    return `${head}nothing defines it, so it won't load again.`;
+  }
+
   private async handleUnload(input: Record<string, unknown>): Promise<ToolResult> {
     const framework = this.requireFramework();
     const id = typeof input.id === 'string' ? input.id.trim() : '';
@@ -522,8 +535,8 @@ export class McplAdminModule implements Module {
     }
 
     // Every overlay change is read, changed and saved with nothing awaited
-    // between, so a write landing while the server disconnects (another
-    // deploy, say) is never overwritten by a stale copy.
+    // between, so a write landing for another id while the server
+    // disconnects (another deploy, say) is never overwritten by a stale copy.
     // - A tombstone is saved before the disconnect: an unload asked to
     //   persist is recorded even if the disconnect fails, and a retry writes
     //   the same tombstone again.
@@ -531,15 +544,20 @@ export class McplAdminModule implements Module {
     //   (read again after the disconnect). Removed first, a failed
     //   disconnect would leave the server running with no entry, and a retry
     //   would take it for the operator's and tombstone that over it
-    //   (Nell-1783's haiku probe; this shape is one of its patches).
+    //   (Nell-1783's haiku probe; this shape is one of its patches). And it
+    //   is removed only if it is still the entry this unload read: one a
+    //   deploy wrote meanwhile is that deploy's (Ada-1017's review).
     const agentEntry = persist && overlayEntryReplaces(overlay[id]);
-    let persistNote = 'Session-only: it will load again on the next host restart.';
+    const readEntry = JSON.stringify(overlay[id] ?? null);
+    let persistNote: string;
     if (persist && !agentEntry) {
       overlay[id] = { disabled: true };
       saveAgentOverlay(this.overlayPath, overlay);
       persistNote = 'Tombstoned in your overlay — it stays unloaded across host restarts; redeploy with mcpl_deploy to restore.';
     } else if (agentEntry) {
       persistNote = `Kept in your agent overlay, so it loads at the next host start; mcpl_unload "${id}" again removes it.`;
+    } else {
+      persistNote = this.sessionOnlyNote(id, overlay);
     }
 
     // Only a listed server is disconnected: an id the overlay alone names
@@ -557,12 +575,16 @@ export class McplAdminModule implements Module {
 
     if (agentEntry) {
       const current = readAgentOverlay(this.overlayPath);
-      const replaced = this.replacement(id, current) !== null;
-      delete current[id];
-      saveAgentOverlay(this.overlayPath, current);
-      persistNote = replaced
-        ? `Removed from your agent overlay; the operator's definition of "${id}" loads again at the next host start.`
-        : 'Removed from your agent overlay.';
+      if (JSON.stringify(current[id] ?? null) !== readEntry) {
+        persistNote = 'Your overlay entry for it changed while it disconnected (a deploy?), so it was left as it is now. ' + this.sessionOnlyNote(id, current, 'next');
+      } else {
+        const replaced = this.replacement(id, current) !== null;
+        delete current[id];
+        saveAgentOverlay(this.overlayPath, current);
+        persistNote = replaced
+          ? `Removed from your agent overlay; the operator's definition of "${id}" loads again at the next host start.`
+          : 'Removed from your agent overlay.';
+      }
     }
     return ok(known
       ? `Unloaded server "${id}" — its tools are gone from your toolset. ${persistNote}`

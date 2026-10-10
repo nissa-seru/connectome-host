@@ -313,11 +313,56 @@ describe('mcpl_unload', () => {
     (stub as unknown as { disconnectMcplServer: () => Promise<void> }).disconnectMcplServer =
       async () => { throw 'socket wedged'; };
     const mod = makeModule(stub);
+    mod.setOperatorServers([{ id: 'discord', command: 'node' }]);
 
     const result = await call(mod, 'mcpl_unload', { id: 'discord', persist: false });
 
-    expect(result.error).toBe('Server "discord" couldn\'t be disconnected: socket wedged. It may still be loaded in this session. Session-only: it will load again on the next host restart.');
+    expect(result.error).toBe('Server "discord" couldn\'t be disconnected: socket wedged. It may still be loaded in this session. Session-only: the operator\'s definition loads it again.');
     expect(readAgentOverlay(overlayPath)).toEqual({});
+  });
+
+  // Ada-1017's review of ad8062a: the session-only note assumed the server
+  // loads again, but a tombstone a failed persisted unload saved first keeps
+  // it unloaded; and a same-id deploy landing during an agent-entry unload
+  // was deleted with the entry the unload had read.
+  test("a session-only unload says what loads at the next start, read from the overlay", async () => {
+    const { stub } = makeStubFramework();
+    await (stub as unknown as { connectMcplServer: (c: { id: string; command: string }) => Promise<void> })
+      .connectMcplServer({ id: 'discord', command: 'node' });
+    const disconnect = (stub as unknown as { disconnectMcplServer: (id: string) => Promise<void> }).disconnectMcplServer;
+    (stub as unknown as { disconnectMcplServer: () => Promise<void> }).disconnectMcplServer =
+      async () => { throw new Error('stuck'); };
+    const mod = makeModule(stub);
+    mod.setOperatorServers([{ id: 'discord', command: 'node' }]);
+
+    // A persisted unload whose disconnect fails saves the tombstone first.
+    expect((await call(mod, 'mcpl_unload', { id: 'discord' })).success).toBe(false);
+    (stub as unknown as { disconnectMcplServer: (id: string) => Promise<void> }).disconnectMcplServer = disconnect;
+    const retried = await call(mod, 'mcpl_unload', { id: 'discord', persist: false });
+    expect(retried.data).toBe('Unloaded server "discord" — its tools are gone from your toolset. Session-only: your overlay tombstones it, so it stays unloaded across host restarts.');
+
+    // An agent entry the overlay keeps loads again; an id nothing defines doesn't.
+    await call(mod, 'mcpl_deploy', { id: 'mine', command: 'bun' });
+    expect((await call(mod, 'mcpl_unload', { id: 'mine', persist: false })).data).toBe('Unloaded server "mine" — its tools are gone from your toolset. Session-only: your overlay entry loads it again.');
+    await (stub as unknown as { connectMcplServer: (c: { id: string; command: string }) => Promise<void> })
+      .connectMcplServer({ id: 'adhoc', command: 'node' });
+    expect((await call(mod, 'mcpl_unload', { id: 'adhoc', persist: false })).data).toBe('Unloaded server "adhoc" — its tools are gone from your toolset. Session-only: nothing defines it, so it won\'t load again.');
+  });
+
+  test('a deploy of the same id landing during an unload keeps its entry, and the receipt says so', async () => {
+    const { stub } = makeStubFramework();
+    const mod = makeModule(stub);
+    await call(mod, 'mcpl_deploy', { id: 'mytool', command: 'node' });
+    const disconnect = (stub as unknown as { disconnectMcplServer: (id: string) => Promise<void> }).disconnectMcplServer;
+    (stub as unknown as { disconnectMcplServer: (id: string) => Promise<void> }).disconnectMcplServer = async (id) => {
+      saveAgentOverlay(overlayPath, { ...readAgentOverlay(overlayPath), mytool: { command: 'bun' } });
+      await disconnect(id);
+    };
+
+    const result = await call(mod, 'mcpl_unload', { id: 'mytool' });
+
+    expect(result.data).toBe('Unloaded server "mytool" — its tools are gone from your toolset. Your overlay entry for it changed while it disconnected (a deploy?), so it was left as it is now. At the next host start, your overlay entry loads it again.');
+    expect(readAgentOverlay(overlayPath).mytool).toEqual({ command: 'bun' });
   });
 
   test('an unload asked to persist is recorded even when the disconnect fails, and the receipt says so', async () => {
