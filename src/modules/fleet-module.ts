@@ -1212,6 +1212,16 @@ export class FleetModule implements Module {
       };
     }
 
+    // Before the new record replaces the generation this launch began from,
+    // so a host that can't start children keeps that record.
+    if (!this.config.childIndexPath) {
+      return {
+        success: false,
+        isError: true,
+        error: 'cannot determine connectome-host script path (configure FleetModule with childIndexPath)',
+      };
+    }
+
     mkdirSync(dataDir, { recursive: true });
 
     const child: FleetChild = {
@@ -1241,15 +1251,6 @@ export class FleetModule implements Module {
     if (input.env !== undefined) child.env = { ...input.env };
     if (existing) this.cancelAutoRestart(existing);
     this.children.set(input.name, child);
-
-    if (!this.config.childIndexPath) {
-      this.children.delete(input.name);
-      return {
-        success: false,
-        isError: true,
-        error: 'cannot determine connectome-host script path (configure FleetModule with childIndexPath)',
-      };
-    }
 
     // The child's stdout and stderr go to startup.log for its whole life, or
     // nowhere if the parent can't open it. headless.ts redirects

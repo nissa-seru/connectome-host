@@ -431,6 +431,21 @@ describe('FleetModule — unresolved launch artifacts', () => {
     expect(existsSync(join(dataDir, 'startup.log'))).toBe(false);
   });
 
+  // The refusal comes before the new record would replace the old one, so a
+  // host that can't start children keeps the record a launch began from.
+  test('a launch refused for a missing entry script keeps the existing record', async () => {
+    const dataDir = mkdtempSync(join(tmpDir, 'no-entry-script-'));
+    const fleet = new FleetModule({ childIndexPath: '' });
+    fleets.push(fleet);
+    let state: any = trackedState(dataDir);
+    await fleet.start({ getState: () => state, setState: (s: unknown) => { state = s; } } as any);
+    const record = fleet.getChildren().get('guard');
+    expect(record?.status).toBe('crashed');
+    const result = await launch(fleet, dataDir);
+    expect(result.error).toContain('cannot determine connectome-host script path');
+    expect(fleet.getChildren().get('guard')).toBe(record!);
+  });
+
   test('missing Node probe preserves unknown endpoint', async () => {
     const fleet = makeFleet();
     const previous = process.env.PATH;

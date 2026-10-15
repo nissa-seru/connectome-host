@@ -18,3 +18,7 @@
   `exitReason`, which `fleet--status`, `/fleet status` and the TUI show,
   stays one line, and the TUI's fleet view shows a notice of several lines
   by its first line, cut as the alerts beside it are.
+- A fleet launch refused because `FleetModule` has no `childIndexPath` no
+  longer drops the record of the child it would have replaced, such as a
+  crashed child or one restored from the persisted state at the host's
+  start.
