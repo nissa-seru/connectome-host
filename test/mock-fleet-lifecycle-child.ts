@@ -4,7 +4,9 @@
  * stderr are the startup.log the parent opened for it.
  */
 import { createServer, type Socket } from 'node:net';
-import { readFileSync, writeFileSync, unlinkSync, appendFileSync, existsSync, truncateSync, renameSync, writeSync, chmodSync } from 'node:fs';
+import {
+  readFileSync, writeFileSync, unlinkSync, appendFileSync, existsSync, truncateSync, renameSync, writeSync, chmodSync, fstatSync,
+} from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
@@ -25,12 +27,15 @@ const options = JSON.parse(readFileSync(process.argv[2]!, 'utf8')) as {
   lockStartupLog?: boolean;
   /** Make the data directory unsearchable as the child exits. */
   lockDataDir?: boolean;
+  /** Write to this path, first, whether stderr is a regular file. */
+  reportStderr?: string;
 };
 const dataDir = process.env.DATA_DIR!;
 const socketPath = join(dataDir, 'ipc.sock');
 const pidPath = join(dataDir, 'headless.pid');
 
 const startupLog = join(dataDir, 'startup.log');
+if (options.reportStderr !== undefined) writeFileSync(options.reportStderr, fstatSync(2).isFile() ? 'a file' : 'not a file');
 if (options.truncateStartupLog) truncateSync(startupLog, 0);
 if (options.replaceStartupLog !== undefined) {
   writeFileSync(`${startupLog}.new`, options.replaceStartupLog);

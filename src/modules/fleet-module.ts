@@ -32,7 +32,7 @@ import type {
 import { formatZonedDateTime, resolveTimeZone } from '@animalabs/agent-framework';
 import { execFile, spawn as spawnProcess, type ChildProcess } from 'node:child_process';
 import { connect as netConnect, type Socket } from 'node:net';
-import { existsSync, lstatSync, fstatSync, readSync, constants, mkdirSync, unlinkSync, openSync, closeSync, appendFileSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, fstatSync, readSync, writeFileSync, constants, mkdirSync, unlinkSync, openSync, closeSync, realpathSync } from 'node:fs';
 import { join, resolve, isAbsolute } from 'node:path';
 import { type IncomingCommand, type WireEvent, type PanelResponseEvent, matchesSubscription } from './fleet-types.js';
 import { loadRecipe } from '../recipe.js';
@@ -1253,53 +1253,44 @@ export class FleetModule implements Module {
     this.children.set(input.name, child);
 
     // The child's stdout and stderr go to startup.log for its whole life, or
-    // nowhere if the parent can't open it. headless.ts redirects
-    // process.stdout.write and process.stderr.write to headless.log, but
-    // Bun's console.* writes to the file descriptors directly (Bun 1.3.14 and
-    // 1.4.3), so every console line the child prints lands here: a recipe
+    // nowhere if the parent can't open it as a regular file. headless.ts
+    // redirects process.stdout.write and process.stderr.write to headless.log,
+    // but Bun's console.* writes to the file descriptors directly (Bun 1.3.14
+    // and 1.4.3), so every console line the child prints lands here: a recipe
     // error, a missing API key, an import crash, and a fatal error after the
     // redirect, such as a failed listen. A failed launch quotes the end of
     // what the child wrote here after its header, or says why it can't.
-    const startupLogPath = join(dataDir, 'startup.log');
-    try {
-      appendFileSync(startupLogPath, `\n--- launch ${new Date().toISOString()} recipe=${recipePath} pid=parent:${process.pid} ---\n`);
-    } catch { /* best-effort; directory existed from mkdirSync above */ }
-    let startupFd: number | null = null;
-    let startupLog: StartupLog;
-    try {
-      startupFd = openSync(startupLogPath, 'a');
-      // Where this launch's output begins, so a failure quotes only its own.
-      const opened = fstatSync(startupFd, { bigint: true });
-      startupLog = { path: startupLogPath, offset: Number(opened.size), dev: opened.dev, ino: opened.ino };
-    } catch (err) {
-      // Without the file, the child's stdio falls back to 'ignore'.
-      startupLog = {
-        path: startupLogPath,
-        problem: startupFd === null
-          ? `couldn't be opened when the child started (${errnoCode(err)}), so its console output wasn't kept`
-          : `couldn't be checked when the child started (${errnoCode(err)}), so its output isn't quoted`,
-      };
-    }
+    const { fd: startupFd, log: startupLog } = openStartupLog(join(dataDir, 'startup.log'),
+      `\n--- launch ${new Date().toISOString()} recipe=${recipePath} pid=parent:${process.pid} ---\n`);
 
-    const proc = spawnProcess(
-      this.config.childRuntimePath,
-      [this.config.childIndexPath, recipePath, '--headless'],
-      {
-        detached: true,
-        stdio: startupFd !== null ? ['ignore', startupFd, startupFd] : 'ignore',
-        env: {
-          ...process.env,
-          ...input.env,
-          AGENT_TIMEZONE: this.config.timeZone,
-          DATA_DIR: dataDir,
+    let proc: ChildProcess;
+    try {
+      proc = spawnProcess(
+        this.config.childRuntimePath,
+        [this.config.childIndexPath, recipePath, '--headless'],
+        {
+          detached: true,
+          stdio: startupFd !== null ? ['ignore', startupFd, startupFd] : 'ignore',
+          env: {
+            ...process.env,
+            ...input.env,
+            AGENT_TIMEZONE: this.config.timeZone,
+            DATA_DIR: dataDir,
+          },
         },
-      },
-    );
+      );
+    } finally {
+      // The parent doesn't need the fd once the child has inherited it, nor
+      // if spawn threw, as Bun's does for a NUL byte in an argument or env.
+      if (startupFd !== null) {
+        try { closeSync(startupFd); } catch { /* noop */ }
+      }
+    }
     proc.unref();
-
-    // Parent doesn't need the fd once the child has inherited it.
-    if (startupFd !== null) {
-      try { closeSync(startupFd); } catch { /* noop */ }
+    // A launch without the file can still succeed, so the host says so now,
+    // not only if the launch fails.
+    if ('problem' in startupLog) {
+      console.error(`[fleet] launch of "${input.name}": ${startupLog.path} ${startupLog.problem}.`);
     }
 
     child.process = proc;
@@ -2210,14 +2201,52 @@ function isUrlOrAbsolute(p: string): boolean {
 
 /** Where a launch's output begins: the startup.log the parent opened for the
  *  child, and its size, device and inode once the launch's header was
- *  written. Or, when the parent couldn't open or check the file as the child
- *  started, the file and why there's no quote, completing a sentence whose
- *  subject is the file. Once the parent has seen the child exit during the
- *  launch, the quote read then. */
+ *  written. Or, when the parent couldn't open the file as a regular file as
+ *  the child started, the file and why there's no quote, completing a
+ *  sentence whose subject is the file. Once the parent has seen the child
+ *  exit during the launch, the quote read then. */
 type StartupLog = (
   | { path: string; offset: number; dev: bigint; ino: bigint }
   | { path: string; problem: string }
 ) & { quote?: string };
+
+/**
+ * Opens a child's startup.log for its stdout and stderr, writes the launch's
+ * header, and says where the launch's output begins. One open, which doesn't
+ * wait for a FIFO's reader: a FIFO left at the path would otherwise stop the
+ * host's event loop at the open. The child gets the file only if it's a
+ * regular file that took the header; otherwise its stdio goes nowhere, and
+ * the log says why. A child whose writes fail as the header's did would
+ * otherwise be said to have written nothing.
+ */
+function openStartupLog(path: string, header: string): { fd: number | null; log: StartupLog } {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NONBLOCK, 0o666);
+  } catch (err) {
+    return { fd: null, log: { path, problem: `couldn't be opened when the child started (${errnoCode(err)}), ` +
+      'so the child\'s console output wasn\'t kept' } };
+  }
+  let problem: string;
+  let step = 'checked';
+  try {
+    if (fstatSync(fd).isFile()) {
+      step = 'written to';
+      // writeFileSync writes the whole header or throws: a short write, as on
+      // a nearly full disk, is followed by one that fails (EFBIG under a
+      // file-size limit, on Bun 1.3.14 and 1.4.3).
+      writeFileSync(fd, header);
+      step = 'checked';
+      const opened = fstatSync(fd, { bigint: true });
+      return { fd, log: { path, offset: Number(opened.size), dev: opened.dev, ino: opened.ino } };
+    }
+    problem = 'isn\'t a regular file';
+  } catch (err) {
+    problem = `couldn't be ${step} when the child started (${errnoCode(err)})`;
+  }
+  try { closeSync(fd); } catch { /* not handed on either way */ }
+  return { fd: null, log: { path, problem: `${problem}, so the child's console output wasn't kept` } };
+}
 
 /** The most of a child's startup output a failed launch quotes: its last
  *  lines, read from the file's last bytes, at most so many characters as

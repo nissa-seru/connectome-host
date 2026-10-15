@@ -22,3 +22,10 @@
   longer drops the record of the child it would have replaced, such as a
   crashed child or one restored from the persisted state at the host's
   start.
+- A FIFO at a fleet child's `startup.log`, such as one a child left in its
+  own data directory, no longer stops the host's event loop at that child's
+  next launch. The host opens the file without waiting for a FIFO's reader,
+  and gives it to the child only if it's a regular file that took the
+  launch's header; otherwise the child's console output isn't kept, and the
+  host's log says why at the launch, as does the error of a failed launch
+  that would otherwise quote it.

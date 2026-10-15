@@ -6,9 +6,12 @@
  */
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import { appendFileSync, chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync, chmodSync, closeSync, constants, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync,
+  realpathSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 const realOpenSync = fs.openSync;
-import type { ChildProcess } from 'node:child_process';
+import { execFileSync, type ChildProcess } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FleetModule, type FleetModuleConfig } from '../src/modules/fleet-module.js';
@@ -59,6 +62,11 @@ function setup(config: FleetModuleConfig = {}, childIndexPath = join(import.meta
 
 const quoted = (lines: string[]): string => lines.map((line) => `  ${line}`).join('\n');
 
+/** On Linux, the paths this process holds descriptors on. */
+const openPaths = (): string[] => readdirSync('/proc/self/fd').flatMap((fd) => {
+  try { return [readlinkSync(join('/proc/self/fd', fd))]; } catch { return []; }
+});
+
 describe('a failed launch quotes the child\'s own output', () => {
   test('a child that exits before its socket has its error quoted', async () => {
     const { fleet, launch, log } = setup();
@@ -80,6 +88,12 @@ describe('a failed launch quotes the child\'s own output', () => {
     const second = await launch({ crashBeforeSocket: true });
     expect(second.error).toEndWith(`\nThe child wrote nothing to ${log} during this launch.`);
     expect(second.error).not.toContain('the first launch failed this way');
+    // Each launch's header goes after what the file already held.
+    const file = readFileSync(log, 'utf8');
+    const headers = [...file.matchAll(/^--- launch .* ---$/gm)].map((header) => header.index);
+    expect(headers).toHaveLength(2);
+    expect(file.indexOf('the first launch failed this way')).toBeGreaterThan(headers[0]!);
+    expect(file.indexOf('the first launch failed this way')).toBeLessThan(headers[1]!);
   });
 
   // Once its child has exited, the record allows another launch of the name
@@ -338,7 +352,106 @@ describe('a failed launch quotes the child\'s own output', () => {
     const { launch, log } = setup();
     mkdirSync(log, { recursive: true });
     const result = await launch({ stderr: 'lost\n', crashBeforeSocket: true });
-    expect(result.error).toEndWith(`\n${log} couldn't be opened when the child started (EISDIR), so its console output wasn't kept.`);
+    expect(result.error).toEndWith(
+      `\n${log} couldn't be opened when the child started (EISDIR), so the child's console output wasn't kept.`,
+    );
+  });
+
+  // Opened as plain append, a FIFO left at startup.log, by a child in its own
+  // data directory say, would stop the host's event loop at the next launch.
+  test('a FIFO at startup.log as the launch starts doesn\'t block it, with or without a reader', async () => {
+    const { launch, dataDir, log } = setup();
+    mkdirSync(dataDir, { recursive: true });
+    execFileSync('mkfifo', [log]);
+    const unread = await launch({ stderr: 'lost\n', crashBeforeSocket: true });
+    expect(unread.error).toEndWith(
+      `\n${log} couldn't be opened when the child started (ENXIO), so the child's console output wasn't kept.`,
+    );
+    // With a reader the open succeeds, so the file's type refuses it, before
+    // the header is written.
+    const reader = openSync(log, constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      const read = await launch({ stderr: 'lost\n', crashBeforeSocket: true });
+      expect(read.error).toEndWith(`\n${log} isn't a regular file, so the child's console output wasn't kept.`);
+      let received = 0;
+      try { received = readSync(reader, Buffer.alloc(256)); } catch { /* EAGAIN: nothing written */ }
+      expect(received).toBe(0);
+      // The parent closed what it opened; the test's reader is the one left.
+      if (process.platform === 'linux') expect(openPaths().filter((path) => path === realpathSync(log))).toHaveLength(1);
+    } finally {
+      closeSync(reader);
+    }
+  });
+
+  // A header that doesn't fit, as on a full disk, goes in a short write and
+  // then a failed one, and the child's writes would fail the same way. A
+  // file-size limit stands in for the full disk, with SIGXFSZ ignored so the
+  // write fails with EFBIG; the launch runs in a process of its own under it.
+  test('a launch whose header can\'t be written gives the child no file, and says why', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-launch-output-'));
+    dirs.push(dir);
+    const dataDir = join(dir, 'leaf');
+    const log = join(dataDir, 'startup.log');
+    mkdirSync(dataDir);
+    writeFileSync(log, 'y'.repeat(4_096 - 10));
+    const recipe = join(dir, 'recipe.json');
+    const stderrKind = join(dir, 'stderr-kind');
+    writeFileSync(recipe, JSON.stringify({ stderr: 'lost\n', crashBeforeSocket: true, reportStderr: stderrKind }));
+    const script = join(dir, 'launch.ts');
+    writeFileSync(script, [
+      'import { readdirSync, readlinkSync, realpathSync } from "node:fs";',
+      `import { FleetModule } from ${JSON.stringify(join(import.meta.dir, '..', 'src', 'modules', 'fleet-module.ts'))};`,
+      `const fleet = new FleetModule({ childIndexPath: ${JSON.stringify(join(import.meta.dir, 'mock-fleet-lifecycle-child.ts'))},`,
+      '  socketWaitTimeoutMs: 10_000, readyTimeoutMs: 10_000, gracefulShutdownMs: 100, sigtermEscalationMs: 100 });',
+      `const input = { name: 'leaf', recipe: ${JSON.stringify(recipe)}, dataDir: ${JSON.stringify(dataDir)} };`,
+      'const result = await fleet.handleToolCall({ id: "launch", name: "launch", input });',
+      'await fleet.stop();',
+      // The descriptors this process still holds on startup.log, on Linux.
+      `const log = realpathSync(${JSON.stringify(log)});`,
+      'const open = process.platform !== "linux" ? [] : readdirSync("/proc/self/fd").filter((fd) => {',
+      '  try { return readlinkSync(`/proc/self/fd/${fd}`) === log; } catch { return false; }',
+      '});',
+      'console.log(JSON.stringify({ result, open }));',
+    ].join('\n'));
+    const run = Bun.spawnSync({
+      cmd: ['bash', '-c', 'trap "" XFSZ; ulimit -f 4; exec "$0" "$1"', process.execPath, script],
+      env: { ...process.env, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' },
+      timeout: 15_000,
+    });
+    const { result, open } = JSON.parse(run.stdout.toString().trim().split('\n').at(-1) ?? 'null');
+    expect(result.error).toEndWith(
+      `\n${log} couldn't be written to when the child started (EFBIG), so the child's console output wasn't kept.`,
+    );
+    // The child's stderr wasn't the file, and the parent kept no descriptor on it.
+    expect(readFileSync(stderrKind, 'utf8')).toBe('not a file');
+    expect(open).toEqual([]);
+  }, 20_000);
+
+  // Bun's spawn throws for a NUL byte in an argument, such as a mistyped
+  // childIndexPath; the parent's copy of the descriptor closes all the same.
+  test.skipIf(process.platform !== 'linux')('a spawn that throws leaves no descriptor open on startup.log', async () => {
+    const { launch, log } = setup({}, `${join(import.meta.dir, 'mock-fleet-lifecycle-child.ts')}\0`);
+    const result = await launch({});
+    expect(result.success).toBe(false);
+    // The launch got as far as the open: the header is there.
+    expect(readFileSync(log, 'utf8')).toContain('--- launch ');
+    expect(openPaths()).not.toContain(realpathSync(log));
+  });
+
+  // Such a launch can succeed, so the host says so as it launches, not only
+  // if the launch fails.
+  test('a launch that runs without the file says so in the host\'s log', async () => {
+    const { launch, log } = setup();
+    mkdirSync(log, { recursive: true });
+    const errors = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const result = await launch({});
+      expect(result.success).toBe(true);
+      expect(errors).toHaveBeenCalledWith(`[fleet] launch of "leaf": ${log} couldn't be opened when the child ` +
+        'started (EISDIR), so the child\'s console output wasn\'t kept.');
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   // Run as root, the file's mode doesn't stop the read.
