@@ -104,6 +104,29 @@ export function sliceViewport(len: number, cursor: number, avail: number): { sta
   return { start, end };
 }
 
+/** A message as the fleet view's header rows show it: past 70 UTF-16 code
+ *  units, its first 67 and an ellipsis, less the stray half of a character
+ *  outside the BMP that the cut goes through. The alerts and the notice
+ *  share it. */
+function headerMessage(message: string): string {
+  return message.length > 70 ? `${message.slice(0, 67).replace(/[\uD800-\uDBFF]$/, '')}…` : message;
+}
+
+/**
+ * The fleet view's notice as one header row. The viewport counts one row per
+ * header line, so a notice of several lines, such as a failed restart quoting
+ * the child's output, shows its first line, marked " …" as going on, and is
+ * cut as the alerts beside it are when that's past 70 characters, rather than
+ * wrap onto rows the viewport didn't count; the cut's own ellipsis then marks
+ * it. The cut counts UTF-16 code units, not columns, so a line of wide
+ * characters can still wrap, as an alert can. Scrollback keeps the whole
+ * notice.
+ */
+export function fleetNoticeLine(notice: string): string {
+  const newline = notice.indexOf('\n');
+  return `  ⚠ ${headerMessage(newline < 0 ? notice : `${notice.slice(0, newline)} …`)}`;
+}
+
 /** Local wall-clock HH:MM, for event-line timestamps. */
 function hhmm(now = new Date()): string {
   return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -1329,14 +1352,14 @@ export async function runTui(app: AppContext): Promise<void> {
     const header: FleetLine[] = [];
     header.push({ text: '─── Agent Fleet ─── ↑↓:nav  ⏎/→:fold  p:peek  Del:stop  r:restart  Esc:chat ───', color: GRAY });
     if (fleetNotice) {
-      header.push({ text: `  ⚠ ${fleetNotice}`, color: RED });
+      header.push({ text: fleetNoticeLine(fleetNotice), color: RED });
     }
     // Active ops alerts, in full — the status bar only has room for a count,
     // and the firing lines are somewhere back in chat scrollback. This is the
     // ops view; the ringing klaxons belong at the top of it.
     const alerts = [...opsAlerts.values()];
     for (const a of alerts.slice(0, 3)) {
-      const msg = a.message.length > 70 ? a.message.slice(0, 67) + '…' : a.message;
+      const msg = headerMessage(a.message);
       header.push({ text: `  ⚠ [${a.agent}] ${a.kind}${a.count > 1 ? ` ×${a.count}` : ''} — ${msg}`, color: RED });
     }
     if (alerts.length > 3) {

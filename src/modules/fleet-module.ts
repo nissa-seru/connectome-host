@@ -1251,21 +1251,33 @@ export class FleetModule implements Module {
       };
     }
 
-    // Capture early-crash output on disk.  If the child dies before
-    // headless.ts installs its runtime log redirect — missing bun, bad
-    // shebang, ANTHROPIC_API_KEY validation exit, recipe parse failure,
-    // import crash — this is the only place that output can land.  After
-    // the runtime redirect runs, console output flows into headless.log
-    // instead; startup.log just holds the pre-redirect bootstrap slice.
+    // The child's stdout and stderr go to startup.log for its whole life, or
+    // nowhere if the parent can't open it. headless.ts redirects
+    // process.stdout.write and process.stderr.write to headless.log, but
+    // Bun's console.* writes to the file descriptors directly (Bun 1.3.14 and
+    // 1.4.3), so every console line the child prints lands here: a recipe
+    // error, a missing API key, an import crash, and a fatal error after the
+    // redirect, such as a failed listen. A failed launch quotes the end of
+    // what the child wrote here after its header, or says why it can't.
     const startupLogPath = join(dataDir, 'startup.log');
     try {
       appendFileSync(startupLogPath, `\n--- launch ${new Date().toISOString()} recipe=${recipePath} pid=parent:${process.pid} ---\n`);
     } catch { /* best-effort; directory existed from mkdirSync above */ }
     let startupFd: number | null = null;
+    let startupLog: StartupLog;
     try {
       startupFd = openSync(startupLogPath, 'a');
-    } catch {
-      startupFd = null;  // fall back to stdio: 'ignore' if we can't open the file
+      // Where this launch's output begins, so a failure quotes only its own.
+      const opened = fstatSync(startupFd, { bigint: true });
+      startupLog = { path: startupLogPath, offset: Number(opened.size), dev: opened.dev, ino: opened.ino };
+    } catch (err) {
+      // Without the file, the child's stdio falls back to 'ignore'.
+      startupLog = {
+        path: startupLogPath,
+        problem: startupFd === null
+          ? `couldn't be opened when the child started (${errnoCode(err)}), so its console output wasn't kept`
+          : `couldn't be checked when the child started (${errnoCode(err)}), so its output isn't quoted`,
+      };
     }
 
     const proc = spawnProcess(
@@ -1292,7 +1304,14 @@ export class FleetModule implements Module {
     child.process = proc;
     child.pid = proc.pid ?? null;
 
+    // While the launch is unsettled, the child's exit ends the output a failed
+    // launch quotes, and once the record shows the exit it allows another
+    // launch of the name, whose header and output come after. So the exit
+    // handler reads the quote first, synchronously, before any listener can
+    // start one. An exit after the launch has settled reads nothing.
+    let launching = true;
     proc.on('exit', (code, signal) => {
+      if (launching) startupLog.quote = quoteStartupOutput(startupLog);
       child.exitedAt = Date.now();
       child.exitCode = code ?? null;
       const exit = exitText(code, signal);
@@ -1335,7 +1354,9 @@ export class FleetModule implements Module {
       await this.waitForReady(child);
     } catch (err) {
       const reason = `${failureStage}: ${err instanceof Error ? err.message : String(err)}`;
-      return await this.failLaunch(child, reason);
+      return await this.failLaunch(child, reason, startupLog);
+    } finally {
+      launching = false;
     }
 
     this.persistState();
@@ -2011,17 +2032,37 @@ export class FleetModule implements Module {
   }
 
   /** Abort only the subprocess owned by this launch, never an adopted child.
-   * Natural nonzero exits keep their retry even when notification races cleanup. */
-  private async failLaunch(child: FleetChild, reason: string): Promise<ToolResult> {
+   * Natural nonzero exits keep their retry even when notification races cleanup.
+   * The error quotes the end of the child's own output during the launch,
+   * which names the cause when the stage alone can't, such as a recipe
+   * error; the record's exitReason stays one line. */
+  private async failLaunch(child: FleetChild, reason: string, startupLog?: StartupLog): Promise<ToolResult> {
     const proc = child.process;
     // The exit handler records the failure beside the exit, whenever the exit
     // is observed.
     child.launchFailure = reason;
+    if (proc && proc.pid === undefined && proc.exitCode === null && proc.signalCode === null) {
+      // The spawn started no process, such as for a runtime that isn't there:
+      // it has no pid and no exit. There's nothing to stop or wait for,
+      // nothing it could have written, and no exit to come, so the record
+      // doesn't block another launch.
+      child.exitedAt = Date.now();
+      child.status = 'crashed';
+      child.exitReason = `${reason}; no process started for this launch`;
+      if (child.autoRestart) {
+        child.autoRestartStopped ??= 'no process started for its launch, which is not retried; fleet restart or launch starts it again';
+      }
+      this.persistState();
+      return { success: false, isError: true, error: `${child.exitReason}, so there's no output to quote` };
+    }
     if (this.stopping && this.detachMode) {
       // The shutdown closed the connection the launch was waiting on, and a
       // detaching parent leaves its children for a later parent to adopt.
       return { success: false, isError: true, error: `${reason}; the parent is detaching, so the child is left running` };
     }
+    // Read as the child exited, or now if the exit hasn't been seen: its stop
+    // is unconfirmed, or its exit's event hasn't run.
+    const output = (): string => (startupLog ? startupLog.quote ?? quoteStartupOutput(startupLog) : '');
     if (proc && proc.exitCode === null && proc.signalCode === null) {
       // SIGKILL exits are already excluded from autoRestart. Leave the manual
       // cancellation flag alone: a natural nonzero exit may be pending even
@@ -2031,15 +2072,18 @@ export class FleetModule implements Module {
       try { proc.kill('SIGKILL'); } catch { /* exit confirmation below is authoritative */ }
       if (!await this.waitForExit(proc, 2_000)) {
         // Keep launches blocked until the exit handler observes actual death.
+        const unconfirmed = `${reason}; child termination unconfirmed (pid=${child.pid})`;
         child.status = 'starting';
-        child.exitReason = `${reason}; child termination unconfirmed (pid=${child.pid})`;
+        child.exitReason = unconfirmed;
         this.persistState();
-        return { success: false, isError: true, error: child.exitReason };
+        return { success: false, isError: true, error: unconfirmed + output() };
       }
     } else if (proc && child.exitedAt === null) {
       // The process shows its exit, but its 'exit' event hasn't run: record
       // the exit now, so the launch can't stay 'starting'. The event, when it
-      // comes, records the same and may still retry.
+      // comes, records the same and may still retry. The quote is read below
+      // with no await in between, so it ends where the file stands now, before
+      // the record lets another launch of the name begin.
       child.exitedAt = Date.now();
       child.exitCode = proc.exitCode;
       child.status = proc.exitCode === 0 ? 'exited' : 'crashed';
@@ -2050,7 +2094,7 @@ export class FleetModule implements Module {
       child.exitReason = withLaunchFailure(reason, child.exitReason);
       this.persistState();
     }
-    return { success: false, isError: true, error: reason };
+    return { success: false, isError: true, error: reason + output() };
   }
 
   /**
@@ -2161,6 +2205,131 @@ export class FleetModule implements Module {
 
 function isUrlOrAbsolute(p: string): boolean {
   return p.startsWith('http://') || p.startsWith('https://') || isAbsolute(p);
+}
+
+/** Where a launch's output begins: the startup.log the parent opened for the
+ *  child, and its size, device and inode once the launch's header was
+ *  written. Or, when the parent couldn't open or check the file as the child
+ *  started, the file and why there's no quote, completing a sentence whose
+ *  subject is the file. Once the parent has seen the child exit during the
+ *  launch, the quote read then. */
+type StartupLog = (
+  | { path: string; offset: number; dev: bigint; ino: bigint }
+  | { path: string; problem: string }
+) & { quote?: string };
+
+/** The most of a child's startup output a failed launch quotes: its last
+ *  lines, read from the file's last bytes, at most so many characters as
+ *  printed, each line's indent and newline included. */
+const STARTUP_QUOTE_LINES = 20;
+const STARTUP_QUOTE_CHARS = 2_000;
+const STARTUP_READ_BYTES = 64 * 1024;
+const STARTUP_QUOTE_INDENT = '  ';
+
+function errnoCode(err: unknown): string {
+  return (err as NodeJS.ErrnoException | null)?.code ?? String(err);
+}
+
+/** Bun.stripANSI, reached through globalThis: the web UI's typecheck reads
+ *  this module (through commands.ts) without Bun's types. */
+function stripANSI(text: string): string {
+  return (globalThis as unknown as { Bun: { stripANSI(text: string): string } }).Bun.stripANSI(text);
+}
+
+/**
+ * The end of what the child wrote to startup.log during this launch, under a
+ * line that says where it's from, for a failed launch's error, or a line that
+ * says why there's none. Another file at that path, such as one a link there
+ * names now, holds none of it, since the child writes to the descriptor it
+ * inherited, so it isn't read. A file now shorter than where this launch
+ * began was truncated since: what it holds now, or its end, is quoted and
+ * said to be that. A truncation isn't detected if the file is back at or past
+ * that point when it's read, or if it comes between the size check and the
+ * read. Anything that isn't a regular file isn't read.
+ */
+function quoteStartupOutput(log: StartupLog): string {
+  if ('problem' in log) return `\n${log.path} ${log.problem}.`;
+  let text = '';
+  // Whether the file was truncated since the launch began, so what it holds
+  // may not be this launch's output.
+  let truncated = false;
+  let unread = false;
+  let fd: number | undefined;
+  try {
+    fd = openSync(log.path, constants.O_RDONLY | constants.O_NONBLOCK);
+    const stat = fstatSync(fd, { bigint: true });
+    if (!stat.isFile()) return `\n${log.path} isn't a regular file now, so it isn't read.`;
+    if (stat.dev !== log.dev || stat.ino !== log.ino) {
+      return `\n${log.path} was replaced during this launch, so it doesn't hold the child's output, and isn't read.`;
+    }
+    const size = Number(stat.size);
+    truncated = size < log.offset;
+    const start = truncated ? 0 : log.offset;
+    const from = Math.max(start, size - STARTUP_READ_BYTES);
+    const buffer = Buffer.alloc(size - from);
+    text = buffer.subarray(0, readSync(fd, buffer, 0, buffer.length, from)).toString('utf8');
+    // A read that starts after the output's start can start mid-line,
+    // mid-character (decoded as U+FFFD), or inside an escape sequence, whose
+    // tail then isn't one. The caps below usually cut that first line, since
+    // 64 KiB is far past the character cap, though blank lines dropped from
+    // the end can leave it short enough to stay. Either way the lead says the
+    // rest is in the file.
+    unread = from > start;
+  } catch (err) {
+    return `\n${log.path} couldn't be read (${errnoCode(err)}), so the child's output isn't quoted.`;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* the read is done */ }
+    }
+  }
+  if (text === '') {
+    return truncated
+      ? `\n${log.path} was truncated during this launch, and is empty now.`
+      : `\nThe child wrote nothing to ${log.path} during this launch.`;
+  }
+  // The quote is read as text, and the operator's terminal may show it, so
+  // escape sequences go: the colour Bun writes even to a file under
+  // FORCE_COLOR, and any other a child prints, such as OSC. So do the other
+  // control characters but tab and newline: OpenTUI 0.1.107 writes a bell or
+  // a backspace to the terminal as it is, and breaks the line at a carriage
+  // return, so a progress line's pieces are joined. startup.log keeps them.
+  // Each line is stripped on its own: Bun.stripANSI drops everything after a
+  // sequence it finds no end for, which would hide an error printed after a
+  // stray one. A sequence that really spans lines, such as sixel graphics,
+  // leaves its later lines as printable noise.
+  let lines = text.split('\n')
+    .map((line) => stripANSI(line).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ''));
+  // Blank lines at the end go, unless they're all there is.
+  let end = lines.length;
+  while (end > 0 && lines[end - 1]!.trim() === '') end--;
+  lines = lines.slice(0, Math.max(end, 1));
+  let cut = unread;
+  if (lines.length > STARTUP_QUOTE_LINES) {
+    lines = lines.slice(-STARTUP_QUOTE_LINES);
+    cut = true;
+  }
+  // Each line counts as printed, with its indent and a newline, less the
+  // newline the last line doesn't have.
+  const printed = (line: string): number => STARTUP_QUOTE_INDENT.length + line.length + 1;
+  let chars = lines.reduce((n, line) => n + printed(line), -1);
+  while (lines.length > 1 && chars > STARTUP_QUOTE_CHARS) {
+    chars -= printed(lines.shift()!);
+    cut = true;
+  }
+  const room = STARTUP_QUOTE_CHARS - STARTUP_QUOTE_INDENT.length;
+  if (lines[0]!.length > room) {
+    // A cut through a character outside the BMP would leave half of it.
+    lines[0] = lines[0]!.slice(-room).replace(/^[\uDC00-\uDFFF]/, '');
+    cut = true;
+  }
+  const lead = truncated
+    ? `${log.path} was truncated during this launch, so this is ` +
+      `${cut ? 'the end of what it holds now (the rest is in the file)' : 'what it holds now'}, ` +
+      'which may not be this launch\'s output:'
+    : cut
+      ? `The end of the child's output during this launch (the rest is in ${log.path}):`
+      : `The child's output during this launch, from ${log.path}:`;
+  return `\n${lead}\n${lines.map((line) => `${STARTUP_QUOTE_INDENT}${line}`).join('\n')}`;
 }
 
 // ---------------------------------------------------------------------------

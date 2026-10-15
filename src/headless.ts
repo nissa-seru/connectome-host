@@ -9,9 +9,13 @@
  * Input:   {type:"subscribe",events:[...]} | {type:"text",content} |
  *          {type:"command",command:"/..."} | {type:"shutdown",graceful?}
  *
- * stdout + stderr are redirected to {DATA_DIR}/headless.log so the IPC
- * channel is the only structured output path (parent uses the socket, not
- * pipes).  PID lives at {DATA_DIR}/headless.pid for parent-side liveness.
+ * process.stdout.write and process.stderr.write are redirected to
+ * {DATA_DIR}/headless.log so the IPC channel is the only structured output
+ * path (parent uses the socket, not pipes).  Bun's console.* writes to file
+ * descriptors 1 and 2 directly, not through those methods, so console lines
+ * go wherever those descriptors point: for a fleet child, the startup.log
+ * its parent opened.  PID lives at {DATA_DIR}/headless.pid for parent-side
+ * liveness.
  *
  * One client at a time.  Client disconnect does NOT exit the process —
  * children stay up across parent restarts and accept the next connection.
@@ -67,10 +71,12 @@ export async function runHeadless(app: AppContext, argv: string[] = []): Promise
 
   mkdirSync(dataDir, { recursive: true });
 
-  // -- Redirect stdout/stderr BEFORE anything else may log --
-  // The IPC socket is the only structured output channel; stdout/stderr
-  // become a debug log on disk.  Done first so any later console.log from
-  // framework code lands in the file, not on a parent's pipe.
+  // -- Redirect stdout/stderr writes BEFORE anything else here may log --
+  // The IPC socket is the only structured output channel; direct
+  // process.stdout/stderr.write calls become a debug log on disk.  Bun's
+  // console.* bypasses these methods and writes to descriptors 1 and 2,
+  // which for a fleet child are its startup.log, so console lines from
+  // framework code land there, not here.
   //
   // Match the real process.stdout.write overload signature so libraries
   // passing (chunk, cb) or (chunk, encoding, cb) for backpressure /

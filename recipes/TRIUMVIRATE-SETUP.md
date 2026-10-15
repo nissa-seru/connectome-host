@@ -464,8 +464,8 @@ In any order:
 If a child goes red / crashed:
 
 1. `/fleet status <name>` — see the exit code and reason.
-2. `tail -n 50 data/<name>/headless.log` — the child's runtime log.
-3. `tail -n 50 data/<name>/startup.log` — earlier failures (API key check, recipe parse errors, etc.).
+2. `tail -n 50 data/<name>/startup.log` — the last console lines the child printed, under a `--- launch` line for each launch: an API key check, a recipe parse error, and any error it hits later. A failed launch's error quotes the end of that launch's lines.
+3. `tail -n 50 data/<name>/headless.log` — the headless runtime's own lines: its start, socket connections, shutdown.
 4. Fix whatever caused it.
 5. `/fleet restart <name>` — bring it back.
 

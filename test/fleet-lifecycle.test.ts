@@ -348,7 +348,9 @@ describe('FleetModule lifecycle', () => {
     };
     const result = await api.handleLaunch({ ...input, autoRestart: true }, { viaAutoStart: true });
     expect(result.success).toBe(false);
-    expect(result.error).toBe('subscribe failed: injected subscription failure');
+    expect(result.error).toStartWith('subscribe failed: injected subscription failure\n');
+    // Then the child's output: the mock wrote none.
+    expect(result.error!.split('\n')[1]).toBe(`The child wrote nothing to ${join(input.dataDir, 'startup.log')} during this launch.`);
     const child = fleet.getChildren().get('leaf')!;
     expect(isAlive(child.pid!)).toBe(false);
     expect(child.socket).toBeNull();

@@ -1,9 +1,11 @@
 /**
  * Offline child for FleetModule lifecycle regressions. The recipe file contains
- * only fixture options; no framework or provider is started.
+ * only fixture options; no framework or provider is started. Its stdout and
+ * stderr are the startup.log the parent opened for it.
  */
 import { createServer, type Socket } from 'node:net';
-import { readFileSync, writeFileSync, unlinkSync, appendFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync, appendFileSync, existsSync, truncateSync, renameSync, writeSync, chmodSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
 const options = JSON.parse(readFileSync(process.argv[2]!, 'utf8')) as {
@@ -11,15 +13,41 @@ const options = JSON.parse(readFileSync(process.argv[2]!, 'utf8')) as {
   crashBeforeSocket?: boolean;
   noSocket?: boolean;
   crashOnFile?: string;
+  /** Written to stderr first, as a real child prints a startup error. */
+  stderr?: string;
+  /** Empty startup.log first, as anything truncating it mid-launch would. */
+  truncateStartupLog?: boolean;
+  /** Replace startup.log with a new file holding this text first. */
+  replaceStartupLog?: string;
+  /** Replace startup.log with a FIFO first. */
+  fifoStartupLog?: boolean;
+  /** Take every permission off startup.log after writing to it. */
+  lockStartupLog?: boolean;
+  /** Make the data directory unsearchable as the child exits. */
+  lockDataDir?: boolean;
 };
 const dataDir = process.env.DATA_DIR!;
 const socketPath = join(dataDir, 'ipc.sock');
 const pidPath = join(dataDir, 'headless.pid');
 
+const startupLog = join(dataDir, 'startup.log');
+if (options.truncateStartupLog) truncateSync(startupLog, 0);
+if (options.replaceStartupLog !== undefined) {
+  writeFileSync(`${startupLog}.new`, options.replaceStartupLog);
+  renameSync(`${startupLog}.new`, startupLog);
+}
+if (options.fifoStartupLog) {
+  unlinkSync(startupLog);
+  if (spawnSync('mkfifo', [startupLog]).status !== 0) throw new Error('mkfifo failed');
+}
+if (options.stderr !== undefined) writeSync(2, options.stderr);
+if (options.lockStartupLog) chmodSync(startupLog, 0o000);
+
 appendFileSync(join(dataDir, 'launches.jsonl'), JSON.stringify({
   pid: process.pid, sentinel: process.env.FLEET_TEST_SENTINEL ?? null,
 }) + '\n');
 
+if (options.lockDataDir) chmodSync(dataDir, 0o600);
 if (options.crashBeforeSocket) process.exit(1);
 if (options.noSocket) {
   setInterval(() => {}, 1_000);
