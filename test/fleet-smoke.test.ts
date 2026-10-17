@@ -11,7 +11,7 @@
  */
 import { describe, test, expect, beforeAll, afterAll, spyOn } from 'bun:test';
 import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, lstatSync, readFileSync, readlinkSync, symlinkSync, renameSync, chmodSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createServer, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
@@ -334,6 +334,74 @@ describe('FleetModule — unresolved launch artifacts', () => {
     }, 20_000);
   }
 
+  // An earlier version kept an absolute dataDir as it was given. Restored,
+  // such a record still matches a relaunch into its directory, which
+  // reattaches to its own running child.
+  test('a relaunch adopts a restored child whose dataDir an earlier version kept with a trailing slash', async () => {
+    let state: any;
+    const ctx = { setState: (value: unknown) => { state = value; }, getState: () => state,
+      pushEvent: () => {}, getModule: () => null } as unknown as Parameters<FleetModule['start']>[0];
+    const dataDir = join(tmpDir, 'restored-trailing-slash');
+    const owner = await startOwner(dataDir, false, ctx);
+    const old = owner.getChildren().get('guard')!;
+    let restored: FleetModule | undefined;
+    owner.setDetachMode(true);
+    try {
+      await owner.stop();
+      // An earlier version kept no boot id either.
+      state.children.guard.dataDir = `${dataDir}/`;
+      delete state.children.guard.bootId;
+      restored = makeFleet();
+      spyOn(restored as any, 'bootId').mockReturnValue('this-boot');
+      // Adoption at the start fails once, so the record waits for a relaunch.
+      const connectFailure = spyOn(restored as any, 'connectChildSocket').mockRejectedValueOnce(new Error('temporary connection failure'));
+      try { await restored.start(ctx); } finally { connectFailure.mockRestore(); }
+      expect(restored.getChildren().get('guard')?.socket).toBeNull();
+      expect(restored.getChildren().get('guard')?.dataDir).toBe(dataDir);
+      expect((await launch(restored, dataDir)).success).toBe(true);
+      const adopted = restored.getChildren().get('guard')!;
+      expect(adopted.pid).toBe(old.pid);
+      expect(adopted.status).toBe('ready');
+      expect(adopted.process).toBeNull();
+      // A child that answers runs in this boot, so its record now says so.
+      expect(adopted.bootId).toBe('this-boot');
+      expect(state.children.guard.bootId).toBe('this-boot');
+    } finally {
+      try { await restored?.stop(); } finally { owner.setDetachMode(false); }
+    }
+  }, 20_000);
+
+  // Beside a record of another name this host isn't attached to, a relaunch's
+  // probe of its own record cuts no connection of the host's, so it still
+  // reattaches to its own running child.
+  test('a relaunch adopts its own child beside another record the host is not attached to', async () => {
+    let state: any;
+    const ctx = { setState: (value: unknown) => { state = value; }, getState: () => state,
+      pushEvent: () => {}, getModule: () => null } as unknown as Parameters<FleetModule['start']>[0];
+    const dataDir = join(tmpDir, 'restored-beside-unattached');
+    const owner = await startOwner(dataDir, false, ctx);
+    const old = owner.getChildren().get('guard')!;
+    const helper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
+    let restored: FleetModule | undefined;
+    owner.setDetachMode(true);
+    try {
+      await owner.stop();
+      // A record of another name in the same directory, whose pid is in use.
+      state.children.other = { ...state.children.guard, name: 'other', pid: helper.pid };
+      restored = makeFleet();
+      // Adoption at the start fails once, so the record waits for a relaunch.
+      const connectFailure = spyOn(restored as any, 'connectChildSocket').mockRejectedValueOnce(new Error('temporary connection failure'));
+      try { await restored.start(ctx); } finally { connectFailure.mockRestore(); }
+      expect(restored.getChildren().get('guard')?.socket).toBeNull();
+      expect(restored.getChildren().get('other')?.status).toBe('starting');
+      expect((await launch(restored, dataDir)).success).toBe(true);
+      expect(restored.getChildren().get('guard')!.pid).toBe(old.pid);
+    } finally {
+      helper.kill('SIGKILL');
+      try { await restored?.stop(); } finally { owner.setDetachMode(false); }
+    }
+  }, 20_000);
+
   for (const escalation of [false, true]) {
     test(`adopted-child restart records confirmed death, escalation=${escalation}`, async () => {
       let state: any;
@@ -372,9 +440,10 @@ describe('FleetModule — unresolved launch artifacts', () => {
     }, 20_000);
   }
 
+  // A record from this boot: one from before it has no process to guard.
   function trackedState(dataDir: string, pid: number | null = 2_147_483_647) {
     return { children: { guard: { name: 'guard', recipePath: resolve('mock-recipe'), dataDir,
-      socketPath: join(dataDir, 'ipc.sock'), pid, status: 'ready', startedAt: 1,
+      socketPath: join(dataDir, 'ipc.sock'), pid, status: 'ready', startedAt: Date.now(),
       exitedAt: null, lastEventAt: null, exitCode: null, exitReason: null,
       subscription: ['*'], autoRestart: false, env: null } } };
   }

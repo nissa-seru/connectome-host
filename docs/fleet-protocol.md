@@ -41,7 +41,7 @@ the recipe.
 
 | File | Purpose |
 |---|---|
-| `ipc.sock` | The Unix socket. A leftover socket is unlinked unconditionally at startup (no liveness check), so run one instance per data dir. A fleet parent won't launch into a dataDir that still has one (§4.3). |
+| `ipc.sock` | The Unix socket. A leftover socket is unlinked unconditionally at startup (no liveness check), so run one instance per data dir. A fleet parent won't launch into a dataDir that still has one, or that another of its children is starting or ready in (§4.3). |
 | `headless.log` | Append-only. Once the child has loaded its recipe and built its framework, the headless runtime redirects `process.stdout.write` and `process.stderr.write` here, before it logs anything itself, so **nothing structured goes to stdout** — the socket is the only protocol channel. It holds the runtime's own lines (its start, recipe warnings, socket events, shutdown), written through a stream that a fast exit can cut short. Bun's `console.*` doesn't go through those methods, so a fleet child's console lines go to `startup.log` instead. |
 | `headless.pid` | The child's PID; removed on graceful shutdown. Adoption uses the PID persisted in the parent's own state; the parent reads this file only to confirm a leftover belongs to the dead child it tracks before removing it (§4.3). |
 | `startup.log` | Opened by the *parent's* FleetModule as a fleet child's stdout and stderr, after a `--- launch …` line per launch. Bun's `console.*` writes to those descriptors directly (Bun 1.3.14 and 1.4.3), not through the redirected methods, so every console line the child prints goes to the file the parent opened here, for the child's whole life: a bad recipe, a missing key, an import error, and a fatal error after the redirect. The parent opens it without waiting for a FIFO's reader, and hands it on only as a regular file that took the launch's header; otherwise the child's console output goes nowhere, and the host's log says why. A link there is followed, when the parent opens the file and when it reads it. A launch that fails after the spawn quotes the end of what the child wrote here during it, or says why it can't, unless the parent is detaching and leaves the child running (§4.3). |
@@ -203,7 +203,9 @@ trailing `*` is allowed — `"recipes/*.json"` fails).
 **Paths.** `children[].recipe` resolves at recipe-load time against the parent
 recipe file's directory (or URL base); absolute paths and URLs pass through.
 `dataDir`, and any `recipe` the agent passes to `fleet--launch`, resolve
-against the CWD.
+against the CWD. A `dataDir` is kept and compared resolved, a restored
+record's too, so `data/x/` and `data/x` are one directory. Resolving is
+lexical: a path through a symlink is another directory's path.
 
 **Allowlist.** Active when `allowedRecipes` is set or any child is declared; it
 then contains `allowedRecipes` plus every declared child recipe (including
@@ -251,9 +253,18 @@ files in place. If either file remains, the launch is refused, naming the file
 and what can help: with the parent's record of that name in the dataDir,
 `fleet--status` and launching again with its recipe, which reattaches once that
 child has finished starting and clears the files once the parent can confirm
-they're a stopped child's; with none, another `dataDir` or the host's operator.
-A parent with no record of the child never removes them; an operator has to.
-These checks narrow races but are not a cross-process lock.
+they're a stopped child's; with another child's record there, that child's
+name; with none, another `dataDir` or the host's operator. A parent with no
+record of the child never removes them; an operator has to. A launch is also
+refused while another of the parent's children is `starting` or `ready` in the
+same dataDir and its pid is in use, since that child may be running there
+before its files show it. That holds for every launch: a `fleet--restart`, an
+automatic restart, whose refusal `autoRestartStopped` records, and an
+autoStart. So is a launch of a name whose record the parent isn't attached to,
+such as one restored at its start whose child hasn't answered yet, while that
+record says `starting` or `ready` and its pid is in use, whatever dataDir it
+gives: it would start a second process beside that child, or leave it running
+untracked. These checks narrow races but are not a cross-process lock.
 
 **No subfleets.** Every launch path first loads the child recipe in the parent;
 if it declares `modules.fleet` (`true` or an object), the launch is refused
@@ -292,12 +303,26 @@ ones it wants. `command-output` needs no entry: it bypasses the child's filter
   adoption): check the pid is alive and the socket path is a socket, connect,
   re-subscribe, wait for `ready`, and require `ready.pid` to equal the
   persisted pid (guards against PID reuse). A failure kills nothing and
-  removes nothing. If the probe fails, the record becomes `crashed` when the
-  PID is confirmed gone and stays `starting` otherwise, with `exitReason`
-  `adoption unresolved; …`. If the handshake fails, it stays `starting` with
-  `adopt failed: …`. `fleet--launch` or `fleet--restart` on that name
-  retries. Records that ended for any other reason are kept for
-  `status`/`list` but never adopted, even if their old PID is alive again.
+  removes nothing. If the probe fails, the record's `exitReason` is `adoption
+  unresolved; …`, and if the handshake fails, `adopt failed: …`. Either way
+  the record stays `starting` while it's from this boot and its PID is in use,
+  and becomes `crashed` otherwise: when the PID is confirmed gone or isn't a
+  usable one, or when the record is from an earlier boot, whatever holds its
+  PID now, since no process outlives a boot. A record keeps the boot id it
+  launched under, where Linux gives one (`/proc/sys/kernel/random/boot_id`),
+  and an adoption gives it this boot's; another id means another boot. A
+  record without one, or a host that can't read one, compares the record's
+  start time with the machine's uptime, with a minute of slack. That rests on
+  the clock: a clock stepped forward by more than a minute after a launch, as
+  one without a battery is when it syncs after booting, makes that record look
+  older than the boot, and a clock that booted behind makes an earlier boot's
+  record look like this boot's. On such a machine, start the host once its
+  clock is set. `fleet--restart` on that name, or `fleet--launch` with the
+  record's recipe and dataDir, retries, reattaching once the child answers on
+  its socket; while the record stays `starting` and its child doesn't answer,
+  no other copy of it starts (§4.3). Records that ended for any other reason
+  are kept for `status`/`list` but never adopted, even if their old PID is
+  alive again.
   autoStart children that weren't adopted go through a normal launch, which
   may adopt, clean up or refuse (§4.3); a refusal is logged.
 - **Normal exit** stops every child (`fleet--kill`), with a `process.on('exit')`

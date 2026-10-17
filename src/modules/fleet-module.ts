@@ -32,8 +32,9 @@ import type {
 import { formatZonedDateTime, resolveTimeZone } from '@animalabs/agent-framework';
 import { execFile, spawn as spawnProcess, type ChildProcess } from 'node:child_process';
 import { connect as netConnect, type Socket } from 'node:net';
-import { existsSync, lstatSync, fstatSync, readSync, writeFileSync, constants, mkdirSync, unlinkSync, openSync, closeSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, fstatSync, readSync, readFileSync, writeFileSync, constants, mkdirSync, unlinkSync, openSync, closeSync, realpathSync } from 'node:fs';
 import { join, resolve, isAbsolute } from 'node:path';
+import { uptime } from 'node:os';
 import { type IncomingCommand, type WireEvent, type PanelResponseEvent, matchesSubscription } from './fleet-types.js';
 import { loadRecipe } from '../recipe.js';
 import { REDUCER_REQUIRED_EVENTS } from '../state/agent-tree-reducer.js';
@@ -174,6 +175,11 @@ interface PersistedChild {
   exitReason: string | null;
   subscription: string[];
   autoRestart: boolean;
+  /** The machine's boot id when the child launched, where the host could
+   *  read one (Linux's /proc/sys/kernel/random/boot_id). A restore that
+   *  reads another knows no process of it can be running. Records an
+   *  earlier version wrote have none. */
+  bootId?: string;
 }
 
 interface PersistedFleetState {
@@ -203,6 +209,8 @@ interface FleetChild {
   subscription: string[];
   /** Whether autoRestart is enabled for this child. */
   autoRestart: boolean;
+  /** The boot id the child launched under, as persisted. */
+  bootId?: string;
   /** True between kill request and process exit — suppresses autoRestart for intentional shutdowns. */
   killRequested: boolean;
   /** Host-local flap history; not persisted, so reconstructed children start with a fresh retry budget. */
@@ -406,6 +414,7 @@ export class FleetModule implements Module {
         exitReason: c.exitReason,
         subscription: [...c.subscription],
         autoRestart: c.autoRestart,
+        ...(c.bootId !== undefined ? { bootId: c.bootId } : {}),
       };
     }
     this.ctx.setState<PersistedFleetState>({ children: persisted });
@@ -430,6 +439,15 @@ export class FleetModule implements Module {
     }
     if (!state?.children) return adopted;
 
+    // No process outlives a boot, so a record from an earlier boot has none,
+    // whatever holds its pid now. The boot id tells, where the record and
+    // this host both have one, whatever the clock has done since. Otherwise
+    // the record's start time is read against the machine's uptime, with a
+    // minute of slack for a clock that moved a little.
+    const thisBoot = this.bootId();
+    const bootedAt = Date.now() - uptime() * 1000 - 60_000;
+    const fromThisBoot = (p: PersistedChild): boolean =>
+      typeof p.bootId === 'string' && thisBoot !== undefined ? p.bootId === thisBoot : p.startedAt >= bootedAt;
     for (const [name, p] of Object.entries(state.children)) {
       if (name !== p.name || p.socketPath !== join(p.dataDir, 'ipc.sock')) continue;
 
@@ -441,10 +459,19 @@ export class FleetModule implements Module {
       if (!alive) {
         // Persisted records and failed probes cannot authorize artifact deletion.
         const orphan = this.reconstructOrphan(p);
-        orphan.status = this.pidIsGone(p.pid) ? 'crashed' : 'starting';
-        // canRetryAdoption reads the text up to and including the semicolon.
-        orphan.exitReason = 'adoption unresolved; fleet--restart of it, or fleet--launch with its recipe and ' +
-          'dataDir, probes it again';
+        // A pid that's gone or unusable, or a record from an earlier boot,
+        // leaves no process of it running. A pid in use may be a child still
+        // starting, which no launch replaces (handleLaunch), so the record
+        // says why none starts; fleet--restart uses the record's own recipe
+        // and dataDir. canRetryAdoption reads the text up to and including
+        // the semicolon.
+        const inUse = fromThisBoot(p) && this.pidInUse(p.pid);
+        orphan.status = inUse ? 'starting' : 'crashed';
+        orphan.exitReason = inUse
+          ? `adoption unresolved; its pid (${p.pid}) is still in use, so this host starts no other copy of it, and ` +
+            'fleet--restart of it reattaches once it answers on its socket'
+          : 'adoption unresolved; fleet--restart of it, or fleet--launch with its recipe and ' +
+            'dataDir, probes it again';
         this.children.set(name, orphan);
         continue;
       }
@@ -459,8 +486,10 @@ export class FleetModule implements Module {
       } catch (err) {
         console.error(`[fleet] failed to adopt "${name}": ${String(err)}`);
         // Persisted records and failed probes cannot authorize artifact deletion.
+        // As above, a record from an earlier boot, or one whose pid has gone,
+        // has no process to wait on.
         const orphan = this.reconstructOrphan(p);
-        orphan.status = 'starting';
+        orphan.status = fromThisBoot(p) && this.pidInUse(p.pid) ? 'starting' : 'crashed';
         orphan.exitReason = `adopt failed: ${err instanceof Error ? err.message : String(err)}`;
         this.children.set(name, orphan);
       }
@@ -479,7 +508,9 @@ export class FleetModule implements Module {
     const child: FleetChild = {
       name: p.name,
       recipePath: p.recipePath,
-      dataDir: p.dataDir,
+      // Resolved as a launch resolves it: an earlier version kept an absolute
+      // dataDir as it was given, such as with a trailing slash.
+      dataDir: resolve(p.dataDir),
       socketPath: p.socketPath,
       pid: p.pid,
       process: null,
@@ -494,6 +525,7 @@ export class FleetModule implements Module {
       buffer: '',
       subscription: [...p.subscription],
       autoRestart: p.autoRestart,
+      bootId: typeof p.bootId === 'string' ? p.bootId : undefined,
       killRequested: false,
       restartAttempts: [],
       lastCompletedSpeech: '',  // not persisted; rebuilt on next inference:speech
@@ -606,6 +638,8 @@ export class FleetModule implements Module {
     }
 
     child.adopted = true;
+    // A child that answers runs in this boot, whatever its record said.
+    child.bootId = this.bootId() ?? child.bootId;
     return child;
   }
 
@@ -615,6 +649,38 @@ export class FleetModule implements Module {
       return (err as NodeJS.ErrnoException).code === 'ESRCH';
     }
     return false;
+  }
+
+  /** This machine's boot id, where Linux gives one. It changes at every
+   *  boot, whatever the clock does. */
+  private bootId(): string | undefined {
+    try {
+      return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Whether a pid may belong to a running process: a usable pid that no
+   *  signal has shown gone. A record with no usable pid, such as one whose
+   *  spawn threw or started no process, has no process this host could know
+   *  of. */
+  private pidInUse(pid: number | null): boolean {
+    return pid !== null && Number.isSafeInteger(pid) && pid > 0 && !this.pidIsGone(pid);
+  }
+
+  /** Whether a record's process may still be running in its data directory:
+   *  its status says starting or ready, and its pid is still in use. For a
+   *  record this host isn't attached to, such as one restored at its start,
+   *  the status is what an earlier host saw, so the pid is what tells. */
+  private mayBeRunning(c: FleetChild): boolean {
+    return (c.status === 'starting' || c.status === 'ready') && this.pidInUse(c.pid);
+  }
+
+  /** This host's other children whose processes may still be running in
+   *  dataDir, which a launch of `name` there would share. */
+  private sharersIn(dataDir: string, name: string): FleetChild[] {
+    return [...this.children.values()].filter((c) => c.name !== name && c.dataDir === dataDir && this.mayBeRunning(c));
   }
 
   /** Bun 1.3 reports ENOENT for Unix refusals; 1.4 also maps EMFILE to
@@ -1217,9 +1283,10 @@ export class FleetModule implements Module {
       // Recipe couldn't be loaded — defer to the natural spawn-time failure.
     }
 
-    const dataDir = input.dataDir
-      ? (isAbsolute(input.dataDir) ? input.dataDir : resolve(process.cwd(), input.dataDir))
-      : resolve(process.cwd(), 'data', input.name);
+    // Resolved, so two spellings of one path, such as one with a trailing
+    // slash or a `..`, are recorded and compared as one. Resolving is
+    // lexical: a path through a symlink is another path.
+    const dataDir = resolve(process.cwd(), input.dataDir || join('data', input.name));
 
     const socketPath = join(dataDir, 'ipc.sock');
     const subscription = input.subscription ?? this.config.defaultSubscription;
@@ -1235,7 +1302,12 @@ export class FleetModule implements Module {
             `right now. Once it returns, fleet--status for '${name}' shows whether the child is running.`,
         };
       }
-      if (this.canRetryAdoption(existing) && !existing.process && !existing.socket) {
+      // Not while a child this host is attached to may be running there: a
+      // child closes its client when another connects (headless.ts), so
+      // reattaching through that socket would cut it off from this host
+      // before the refusal below.
+      if (this.canRetryAdoption(existing) && !existing.process && !existing.socket &&
+          !this.sharersIn(dataDir, name).some((c) => c.process || c.adopted)) {
         existing.adopting = true;
         try {
           if (await this.probeLiveness(existing)) {
@@ -1280,6 +1352,28 @@ export class FleetModule implements Module {
     }
     const staleAtReconciliation = staleReason();
     if (staleAtReconciliation) return staleRefusal('checked the files an earlier run left', staleAtReconciliation);
+    // One child per data directory: a child takes its socket and pid file
+    // there, and unlinks any socket it finds as it starts. While another
+    // child's record says starting or ready and its pid is in use, that
+    // child may be running there before its files show it, so the launch is
+    // refused. From here to the new record nothing awaits, so of two
+    // launches into one directory, the second sees the first's record.
+    const others = [...this.children.values()].filter((c) => c.name !== name && c.dataDir === dataDir);
+    const sharer = this.sharersIn(dataDir, name)[0];
+    if (sharer) {
+      // fleet--kill refuses a child this host isn't attached to, and
+      // fleet--restart reattaches to it once it answers.
+      return {
+        success: false, isError: true,
+        error: `Nothing was launched: this host's child '${sharer.name}' is ${sharer.status} in ${dataDir}, and ` +
+          `two children can't share a data directory. Give fleet--launch another dataDir, or ` +
+          (sharer.process || sharer.adopted
+            ? `fleet--kill '${sharer.name}' first.`
+            : `stop '${sharer.name}' first: this host isn't attached to it, so fleet--kill can stop it only once ` +
+              `fleet--restart for '${sharer.name}' has reattached to it, which it does once '${sharer.name}' ` +
+              'answers on its socket.'),
+      };
+    }
     const pidPath = join(dataDir, 'headless.pid');
     for (const artifact of [socketPath, pidPath]) {
       try {
@@ -1297,7 +1391,9 @@ export class FleetModule implements Module {
       // A record of this name in this directory is one a later launch with
       // its recipe can reattach to, or clear up after once its stop can be
       // confirmed, which a record that says stopped may still not allow;
-      // with none, calling again can't help.
+      // another child's record there names whose directory it is; with
+      // neither, calling again can't help.
+      const other = others[0];
       return {
         success: false, isError: true,
         error: existing?.dataDir === dataDir
@@ -1307,10 +1403,33 @@ export class FleetModule implements Module {
             `names retries: it reattaches once that child has finished starting, and clears the files once this ` +
             `host can confirm they're a stopped child's. If it keeps refusing, ask whoever runs this host to ` +
             `check ${socketPath} and ${pidPath}, or give fleet--launch another dataDir.`
-          : `Nothing was launched: ${artifact} is there, and this host has no record of a child in ${dataDir}, ` +
-            `so it can't tell whether a process it didn't start owns it, and calling again refuses the same way ` +
-            `while it's there. Give fleet--launch another dataDir, or ask whoever runs this host to check ` +
-            `${socketPath} and ${pidPath}.`,
+          : other
+            ? `Nothing was launched: ${artifact} is there, and ${dataDir} is the data directory of this host's ` +
+              `child '${other.name}', whose record says ${other.status}. fleet--status for '${other.name}' shows ` +
+              `it; give fleet--launch another dataDir.`
+            : `Nothing was launched: ${artifact} is there, and this host has no record of a child in ${dataDir}, ` +
+              `so it can't tell whether a process it didn't start owns it, and calling again refuses the same way ` +
+              `while it's there. Give fleet--launch another dataDir, or ask whoever runs this host to check ` +
+              `${socketPath} and ${pidPath}.`,
+      };
+    }
+
+    // The rule of the gate at the top of handleLaunch, which refuses a
+    // running record of this name that the host is attached to, here for one
+    // it isn't attached to; files in the directory got their own refusal
+    // above. A host that comes back while a child it left running is still
+    // starting restores it as starting, and can't reattach until the child
+    // answers on its socket. While its pid is in use, this launch would start
+    // a second process beside it, or, in another dataDir, leave this host no
+    // record of it.
+    if (existing && !existing.process && !existing.adopted && this.mayBeRunning(existing)) {
+      return {
+        success: false, isError: true,
+        error: `Nothing was launched: child '${name}' is recorded as ${existing.status} in ${existing.dataDir}, and ` +
+          `its pid (${existing.pid}) is still in use, but this host isn't attached to it, so its process may still ` +
+          `be running there, and a launch now would leave that process running untracked. fleet--restart for ` +
+          `'${name}' reattaches to it once it answers on its socket, and fleet--kill can stop it then. If it keeps ` +
+          `refusing, pid ${existing.pid} may belong to another process: ask whoever runs this host to check it.`,
       };
     }
 
@@ -1357,6 +1476,7 @@ export class FleetModule implements Module {
       buffer: '',
       subscription: [...subscription],
       autoRestart: input.autoRestart ?? false,
+      bootId: this.bootId(),
       killRequested: false,
       // Install history before spawning: an early crash must consume the next
       // retry attempt even if this launch promise has not settled yet.
@@ -1859,8 +1979,8 @@ export class FleetModule implements Module {
     // which may carry a failed launch's unconfirmed stop.
     return !c.process && !c.adopted
       ? `is recorded as ${c.status}, but this host isn't attached to it` +
-        `${c.exitReason !== null ? ` (${c.exitReason})` : ''}. fleet--restart for '${name}' reattaches to it if ` +
-        `it's still alive, or starts it again if it isn't`
+        `${c.exitReason !== null ? ` (${c.exitReason})` : ''}. fleet--restart for '${name}' reattaches to it ` +
+        'once it answers on its socket, or starts it again if its process is gone'
       : c.status === 'ready'
         ? `is ready, but its connection to this host has closed and its exit hasn't been seen yet, so it may ` +
           `be exiting. fleet--status for '${name}' shows its state; if it still shows ready, fleet--restart ` +
@@ -2329,7 +2449,7 @@ export class FleetModule implements Module {
       throw new Error(
         `Nothing was stopped: this host isn't attached to child '${child.name}', whose record says ` +
         `${child.status}, so its process may still be running. fleet--restart for '${child.name}' reattaches to it ` +
-        `if it's still alive, or starts it again if it isn't; then fleet--kill can stop it.`,
+        'once it answers on its socket, or starts it again if its process is gone; then fleet--kill can stop it.',
       );
     }
     if (!proc && (pid === null || !Number.isSafeInteger(pid) || pid <= 0)) {

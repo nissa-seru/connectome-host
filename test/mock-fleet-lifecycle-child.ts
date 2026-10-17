@@ -31,6 +31,8 @@ const options = JSON.parse(readFileSync(process.argv[2]!, 'utf8')) as {
   lockDataDir?: boolean;
   /** Write to this path, first, whether stderr is a regular file. */
   reportStderr?: string;
+  /** Append a line to this path for each client that connects. */
+  connections?: string;
 };
 const dataDir = process.env.DATA_DIR!;
 const socketPath = join(dataDir, 'ipc.sock');
@@ -70,6 +72,7 @@ process.on('exit', () => {
 let client: Socket | null = null;
 const server = createServer((socket) => {
   client = socket;
+  if (options.connections !== undefined) appendFileSync(options.connections, 'connected\n');
   socket.on('error', () => {});
   let buffer = '';
   socket.on('data', (data) => {
