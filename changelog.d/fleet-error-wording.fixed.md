@@ -19,5 +19,4 @@
   same way: `exitReason`, which `fleet--status` shows, as do the TUI for a
   child that has stopped and the `/fleet` console once a child's exit has
   been seen, and `autoRestartStopped`, which `fleet--status` shows. A throw
-  that no handler words, such as a spawn's own error, still reaches the
-  agent as its message.
+  that no handler words still reaches the agent as its message.

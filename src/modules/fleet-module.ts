@@ -234,6 +234,9 @@ interface FleetChild {
   /** A failed launch's reason, kept so the exit, whenever it's recorded,
    *  carries it beside the exit itself. */
   launchFailure?: string;
+  /** Why this launch's spawn started no process: what it threw, or the
+   *  'error' it reported. Kept in memory only. */
+  spawnError?: unknown;
   /** Runtime-only env overrides for restart. Recovered from current config on adoption. */
   env?: Record<string, string>;
   /**
@@ -260,6 +263,41 @@ const KILL_ENDED_RESTARTS = 'fleet--kill ended automatic restarts; fleet--restar
 /** A failed launch's reason beside the exit that ended it. */
 function withLaunchFailure(failure: string, exit: string): string {
   return `${failure} (exit: ${exit})`;
+}
+
+/** A spawn's error as a record and the agent read it, with its code. Node's
+ *  and Bun's ERR_INVALID_ARG_* messages end with the value they refused
+ *  (" Received …"), which for an env value may be a secret, and exitReason is
+ *  persisted, so the text stops before it, or is the code alone. */
+function spawnErrorText(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  const message = err instanceof Error ? err.message : String(err);
+  if (typeof code === 'string' && code.startsWith('ERR_INVALID_ARG')) {
+    const cut = message.indexOf(' Received');
+    return cut >= 0 ? `${message.slice(0, cut)} (${code})` : code;
+  }
+  return typeof code === 'string' && !message.includes(code) ? `${message} (${code})` : message;
+}
+
+/** The codes a spawn gives for a runtime it can't start (Bun 1.3.14 and
+ *  1.4.3, Linux): ENOENT and EACCES come as an 'error' after the spawn
+ *  returns, and the others are thrown. */
+const RUNTIME_SPAWN_CODES: ReadonlySet<string> = new Set(['ENOENT', 'EACCES', 'ELOOP', 'ENOTDIR', 'ENOEXEC']);
+
+/** Whose a spawn error is to fix. The runtime's: one that isn't there, that
+ *  this host may not run, or that the system can't execute, through a
+ *  symlink loop, a path that runs through a file, or a file that isn't a
+ *  program. The spawn sets no working directory, so the runtime's is the only
+ *  path it resolves. The configuration's: a value the spawn refused, which
+ *  came from this host's configuration, such as an env value in its recipe,
+ *  since a launch drops the agent's env and refuses a name, recipe or data
+ *  directory holding a NUL byte at its input checks. Otherwise neither, such
+ *  as a limit the host ran into. */
+function spawnCause(err: unknown): 'runtime' | 'configuration' | 'other' {
+  const code = (err as NodeJS.ErrnoException | null | undefined)?.code;
+  if (typeof code === 'string' && RUNTIME_SPAWN_CODES.has(code)) return 'runtime';
+  if (typeof code === 'string' && code.startsWith('ERR_INVALID_ARG')) return 'configuration';
+  return 'other';
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,6 +1165,24 @@ export class FleetModule implements Module {
           `${got(input.dataDir)}.`,
       };
     }
+    // No name or path holds a NUL byte. Unchecked here, one would be refused
+    // by the spawn, or by the check of the data directory before it, without
+    // saying whose value it was, and a name would go raw into the host's log
+    // lines.
+    for (const [field, what] of [
+      ['name', 'the child\'s short name'],
+      ['recipe', 'the recipe\'s path or URL'],
+      ['dataDir', 'the child\'s data directory'],
+    ] as const) {
+      const value = input[field];
+      if (typeof value === 'string' && value.includes('\0')) {
+        return {
+          success: false, isError: true,
+          error: `Nothing was launched: fleet--launch's "${field}" is ${what}, which can't hold a NUL byte; ` +
+            `${got(value)}.`,
+        };
+      }
+    }
     if (input.subscription != null &&
         (!Array.isArray(input.subscription) || input.subscription.some((event) => typeof event !== 'string'))) {
       const bad = Array.isArray(input.subscription)
@@ -1500,7 +1556,7 @@ export class FleetModule implements Module {
     const { fd: startupFd, log: startupLog } = openStartupLog(join(dataDir, 'startup.log'),
       `\n--- launch ${new Date().toISOString()} recipe=${recipePath} pid=parent:${process.pid} ---\n`);
 
-    let proc: ChildProcess;
+    let proc: ChildProcess | undefined;
     try {
       proc = spawnProcess(
         this.config.childRuntimePath,
@@ -1516,13 +1572,30 @@ export class FleetModule implements Module {
           },
         },
       );
+    } catch (err) {
+      // Bun's spawn throws for a NUL byte in an argument or an env value, a
+      // runtime the system can't execute (ELOOP, ENOTDIR, ENOEXEC), an
+      // environment too large (E2BIG) and a bad stdio descriptor (Bun 1.3.14
+      // and 1.4.3, Linux). No process started.
+      child.spawnError = err;
     } finally {
       // The parent doesn't need the fd once the child has inherited it, nor
-      // if spawn threw, as Bun's does for a NUL byte in an argument or env.
+      // if spawn threw.
       if (startupFd !== null) {
         try { closeSync(startupFd); } catch { /* noop */ }
       }
     }
+    if (proc === undefined) {
+      return await this.failLaunch(child, `launch failed: ${this.spawnFailure(child)}`, startupLog);
+    }
+    // A spawn that can't start the runtime, such as one that isn't there,
+    // reports it here on a later tick, with no pid and no exit to follow, and
+    // the socket wait then ends at once. An error for a process that started,
+    // such as a kill that failed, changes nothing.
+    proc.on('error', (err) => {
+      if (proc.pid === undefined) child.spawnError ??= err;
+      else console.error(`[fleet] child "${child.name}" (pid ${proc.pid}): ${spawnErrorText(err)}`);
+    });
     proc.unref();
     // A launch without the file can still succeed, so the host says so now,
     // not only if the launch fails.
@@ -2029,6 +2102,7 @@ export class FleetModule implements Module {
   ): Promise<void> {
     const timeout = this.config.socketWaitTimeoutMs;
     while (Date.now() < deadline) {
+      if (child.spawnError !== undefined) throw new Error(this.spawnFailure(child));
       if (child.process && (child.process.exitCode !== null || child.process.signalCode !== null)) {
         const { exitCode, signalCode } = child.process;
         const exited = signalCode !== null ? `was ended by ${signalCode}` : `exited with code ${exitCode}`;
@@ -2339,6 +2413,16 @@ export class FleetModule implements Module {
     });
   }
 
+  /** What a launch whose spawn started no process failed on. */
+  private spawnFailure(child: FleetChild): string {
+    const text = spawnErrorText(child.spawnError);
+    switch (spawnCause(child.spawnError)) {
+      case 'runtime': return `its runtime couldn't be started: ${text}`;
+      case 'configuration': return `its spawn refused a value from this host's configuration: ${text}`;
+      default: return `its spawn failed: ${text}`;
+    }
+  }
+
   /** Abort only the subprocess owned by this launch, never an adopted child.
    * Natural nonzero exits keep their retry even when notification races cleanup.
    * The error quotes the end of the child's own output during the launch,
@@ -2351,24 +2435,43 @@ export class FleetModule implements Module {
     // is observed.
     child.launchFailure = reason;
     const failed = `Child '${child.name}' didn't start (${reason})`;
-    if (proc && proc.pid === undefined && proc.exitCode === null && proc.signalCode === null) {
-      // The spawn started no process, such as for a runtime that isn't there:
-      // it has no pid and no exit. There's nothing to stop or wait for,
-      // nothing it could have written, and no exit to come, so the record
-      // doesn't block another launch.
+    if (!proc || (proc.pid === undefined && proc.exitCode === null && proc.signalCode === null)) {
+      // The spawn started no process: it threw, or it has no pid and no exit,
+      // as for a runtime that isn't there. There's nothing to stop or wait
+      // for, nothing it could have written, and no exit to come, so the
+      // record doesn't block another launch.
+      const known = child.spawnError !== undefined;
+      // The way on follows the cause. A runtime that can't be started, or a
+      // value from this host's configuration that the spawn refused, is for
+      // whoever runs the host to change; calling again changes neither.
+      // Anything else, such as a limit the host ran into, may not recur.
+      const cause = spawnCause(child.spawnError);
       child.exitedAt = Date.now();
       child.status = 'crashed';
       child.exitReason = `${reason}; no process started for this launch`;
       if (child.autoRestart) {
-        child.autoRestartStopped ??=
-          'no process started for its launch, which is not retried; fleet--restart or fleet--launch starts it again';
+        // fleet--restart keeps the record's env, where fleet--launch drops it.
+        child.autoRestartStopped ??= cause === 'runtime'
+          ? 'its runtime couldn\'t be started, which is not retried; once whoever runs this host fixes it, ' +
+            'fleet--restart starts it again'
+          : cause === 'configuration'
+            ? 'its spawn refused a value from this host\'s configuration, which is not retried; it can start ' +
+              'again once whoever runs this host changes that value and restarts the host'
+            : 'no process started for its launch, which is not retried; fleet--restart tries again, and if ' +
+              'that fails the same way, ask whoever runs this host';
       }
       this.persistState();
       return {
         success: false, isError: true,
-        error: `${failed}: no process started for it, as when the child's runtime can't be found, so there's ` +
-          'nothing to stop and no output to quote. Nothing is running; if calling fleet--launch again fails the ' +
-          'same way, ask whoever runs this host.',
+        error: `${failed}: no process started for it, ${known ? '' : 'as when the child\'s runtime can\'t be found, '}` +
+          'so there\'s nothing to stop and no output to quote. ' +
+          (cause === 'runtime'
+            ? 'Nothing is running, and calling fleet--launch again fails the same way until whoever runs this host ' +
+              'fixes its child runtime, so ask them.'
+            : cause === 'configuration'
+              ? 'Nothing is running, and only whoever runs this host can change that value and restart the host, ' +
+                'so ask them.'
+              : 'Nothing is running; if fleet--restart fails the same way, ask whoever runs this host.'),
       };
     }
     // Read as the child exited, or now if the exit hasn't been seen: its stop

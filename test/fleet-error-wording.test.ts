@@ -462,15 +462,16 @@ describe('fleet refusals name what the agent can do', () => {
           'adoption unresolved; fleet--restart of it, or fleet--launch with its recipe and dataDir, probes it again',
         );
       }
-      // As a spawn that threw leaves one: starting, with no pid.
-      (fleet as unknown as { children: Map<string, object> }).children.set('spawn-threw', {
-        ...fleet.getChildren().get('exited')!, name: 'spawn-threw', dataDir: join(dir, 'spawn-threw'),
-        socketPath: join(dir, 'spawn-threw', 'ipc.sock'), pid: null, status: 'starting', exitedAt: null,
+      // As a launch whose spawn reported an error is until its socket wait
+      // next looks: starting, with no pid.
+      (fleet as unknown as { children: Map<string, object> }).children.set('spawn-failed', {
+        ...fleet.getChildren().get('exited')!, name: 'spawn-failed', dataDir: join(dir, 'spawn-failed'),
+        socketPath: join(dir, 'spawn-failed', 'ipc.sock'), pid: null, status: 'starting', exitedAt: null,
       });
       let calls = 0;
       const launch = (name: string, into: string) => fleet.handleToolCall({ id: `launch-${++calls}`, name: 'launch',
         input: { name, recipe, dataDir: join(dir, into) } });
-      for (const held of ['exited', 'pidless', 'pid-zero', 'pid-fraction', 'spawn-threw']) {
+      for (const held of ['exited', 'pidless', 'pid-zero', 'pid-fraction', 'spawn-failed']) {
         expect((await launch(`${held}-sharer`, held)).success).toBe(true);
         expect((await launch(held, `${held}-again`)).success).toBe(true);
       }

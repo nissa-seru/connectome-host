@@ -298,13 +298,14 @@ describe('a failed launch quotes the child\'s own output', () => {
     expect(result.error).toBe(
       "Child 'leaf' didn't start (launch failed: socket did not appear): no process started for it, as when the " +
       "child's runtime can't be found, so there's nothing to stop and no output to quote. Nothing is running; if " +
-      'calling fleet--launch again fails the same way, ask whoever runs this host.',
+      'fleet--restart fails the same way, ask whoever runs this host.',
     );
     expect(killed).toBe(false);
     expect(child.status).toBe('crashed');
     expect(child.exitReason).toBe('launch failed: socket did not appear; no process started for this launch');
     expect(child.autoRestartStopped).toBe(
-      'no process started for its launch, which is not retried; fleet--restart or fleet--launch starts it again',
+      'no process started for its launch, which is not retried; fleet--restart tries again, and if that fails the ' +
+      'same way, ask whoever runs this host',
     );
   });
 
@@ -441,12 +442,17 @@ describe('a failed launch quotes the child\'s own output', () => {
   // Bun's spawn throws for a NUL byte in an argument, such as a mistyped
   // childIndexPath; the parent's copy of the descriptor closes all the same.
   test.skipIf(process.platform !== 'linux')('a spawn that throws leaves no descriptor open on startup.log', async () => {
-    const { launch, log } = setup({}, `${join(import.meta.dir, 'mock-fleet-lifecycle-child.ts')}\0`);
+    const { fleet, launch, log } = setup({}, `${join(import.meta.dir, 'mock-fleet-lifecycle-child.ts')}\0`);
     const result = await launch({});
     expect(result.success).toBe(false);
     // The launch got as far as the open: the header is there.
     expect(readFileSync(log, 'utf8')).toContain('--- launch ');
     expect(openPaths()).not.toContain(realpathSync(log));
+    // Its record ends as a later failure's does, not starting, and the index
+    // path is the host's own configuration.
+    expect(fleet.getChildren().get('leaf')!.status).toBe('crashed');
+    expect(result.error).toStartWith('Child \'leaf\' didn\'t start (launch failed: its spawn refused a value from this ' +
+      'host\'s configuration: The argument \'args[0]\' must be a string without null bytes. (ERR_INVALID_ARG_VALUE)): ');
   });
 
   // Such a launch can succeed, so the host says so as it launches, not only
@@ -523,4 +529,220 @@ describe('a failed launch quotes the child\'s own output', () => {
     expect(result.error).toContain('\nThe child\'s output during this launch, from ');
     expect(result.error).toContain('references environment variable ${FLEET_LAUNCH_OUTPUT_TEST_UNSET} which is not set.');
   }, 20_000);
+});
+
+// A spawn that starts no process (Bun 1.3.14 and 1.4.3, Linux) either
+// reports 'error' on a later tick, with no pid and no exit to follow, for a
+// runtime that isn't there or that may not run, or throws, as for a NUL byte
+// in an argument or an env value, or a runtime the system can't execute.
+// Either way the launch ends at once with the spawn's own error, and its
+// record the way a later failure's is.
+describe('a launch whose spawn starts no process', () => {
+  /** A fleet started with a context whose saved state the test reads. */
+  async function started(config: FleetModuleConfig) {
+    const made = setup(config);
+    let saved: { children: Record<string, { status: string; exitReason: string | null }> } | undefined;
+    await made.fleet.start({ getState: () => null, setState: (value: typeof saved) => { saved = value; } } as unknown as
+      Parameters<FleetModule['start']>[0]);
+    return { ...made, saved: () => saved };
+  }
+
+  for (const [kind, runtime, code] of [
+    ['isn\'t there', () => '/nonexistent/fleet-runtime', 'ENOENT'],
+    ['may not be run', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'fleet-runtime-'));
+      dirs.push(dir);
+      const path = join(dir, 'runtime');
+      writeFileSync(path, '#!/bin/sh\n');
+      chmodSync(path, 0o644);
+      return path;
+    }, 'EACCES'],
+  ] as const) {
+    test(`a runtime that ${kind} fails the launch at once with its code, for whoever runs the host to fix`, async () => {
+      const { fleet, launch, saved } = await started({ childRuntimePath: runtime() });
+      const result = await launch({});
+      // The reason is the spawn's error, so the socket wait ended on it, not
+      // at its timeout (10 s here, past the test's own 5 s).
+      expect(result.error).toStartWith(`Child 'leaf' didn't start (launch failed: its runtime couldn't be started: `);
+      expect(result.error).toContain(code);
+      expect(result.error).toEndWith('): no process started for it, so there\'s nothing to stop and no output to ' +
+        'quote. Nothing is running, and calling fleet--launch again fails the same way until whoever runs this host ' +
+        'fixes its child runtime, so ask them.');
+      const record = fleet.getChildren().get('leaf')!;
+      expect(record.status).toBe('crashed');
+      expect(record.exitReason).toStartWith('launch failed: its runtime couldn\'t be started: ');
+      expect(record.exitReason).toEndWith('; no process started for this launch');
+      expect(saved()!.children.leaf.status).toBe('crashed');
+      // The record holds nothing: a relaunch tries again, and fails the same way.
+      expect((await launch({})).error).toStartWith(`Child 'leaf' didn't start (launch failed: its runtime couldn't`);
+    });
+  }
+
+  // A runtime the system can't execute makes the spawn throw instead (Bun
+  // 1.3.14 and 1.4.3, Linux), and it's the runtime's to fix all the same.
+  test.skipIf(process.platform !== 'linux')('a runtime the system can\'t execute fails the launch with its code, for whoever runs the host to fix', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-runtime-'));
+    dirs.push(dir);
+    const file = join(dir, 'file');
+    writeFileSync(file, 'not a program\n');
+    chmodSync(file, 0o755);
+    symlinkSync(join(dir, 'loop-b'), join(dir, 'loop-a'));
+    symlinkSync(join(dir, 'loop-a'), join(dir, 'loop-b'));
+    for (const [runtime, code] of [[join(dir, 'loop-a'), 'ELOOP'], [join(file, 'bun'), 'ENOTDIR'], [file, 'ENOEXEC']] as const) {
+      const { launch } = setup({ childRuntimePath: runtime });
+      const result = await launch({});
+      expect(result.error).toContain(`(launch failed: its runtime couldn't be started: ${code}: `);
+      expect(result.error).toEndWith('Nothing is running, and calling fleet--launch again fails the same way until ' +
+        'whoever runs this host fixes its child runtime, so ask them.');
+    }
+  });
+
+  test('a runtime that isn\'t there ends automatic restarts, saying whose it is to fix, and fleet--restart starts it once it is', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-runtime-'));
+    dirs.push(dir);
+    const runtime = join(dir, 'runtime');
+    const { fleet } = await started({ childRuntimePath: runtime });
+    const recipe = join(dir, 'recipe.json');
+    writeFileSync(recipe, '{}');
+    const result = await fleet.handleToolCall({ id: 'auto', name: 'launch',
+      input: { name: 'auto', recipe, dataDir: join(dir, 'auto'), autoRestart: true } });
+    expect(result.success).toBe(false);
+    expect(fleet.getChildren().get('auto')!.autoRestartStopped).toBe(
+      'its runtime couldn\'t be started, which is not retried; once whoever runs this host fixes it, ' +
+      'fleet--restart starts it again');
+    // Whoever runs the host puts the runtime in place.
+    symlinkSync(process.execPath, runtime);
+    const restarted = await fleet.handleToolCall({ id: 'restart', name: 'restart', input: { name: 'auto' } });
+    expect(restarted.success).toBe(true);
+    expect(fleet.getChildren().get('auto')!.status).toBe('ready');
+  });
+
+  // The spawn's message for a refused env value ends with the value, which
+  // may be a secret, and an env value comes from the host's recipe, so an
+  // autoStart launch is where it's refused: the value reaches neither the
+  // host's log line, which carries the launch's error, nor the saved record,
+  // nor startup.log.
+  test('an env value the spawn refuses fails an autoStart launch, without the value reaching its log line, the record or startup.log', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-env-'));
+    dirs.push(dir);
+    const recipe = join(dir, 'recipe.json');
+    writeFileSync(recipe, '{}');
+    const dataDir = join(dir, 'leaf');
+    const secret = 'top-secret-env-value';
+    const written: string[] = [];
+    const errors = spyOn(console, 'error').mockImplementation((...args: unknown[]) => { written.push(args.map(String).join(' ')); });
+    const stderr = spyOn(process.stderr, 'write').mockImplementation(((chunk: string | Uint8Array) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write);
+    const failed = '[fleet] autoStart "leaf" failed: ';
+    let made: Awaited<ReturnType<typeof started>>;
+    try {
+      made = await started({
+        autoStart: [{ name: 'leaf', recipe, dataDir, autoRestart: true, env: { FLEET_TEST_SECRET: `${secret}\0` } }],
+      });
+      await waitFor('the autoStart failure to be logged', () => written.some((line) => line.startsWith(failed)));
+    } finally {
+      errors.mockRestore();
+      stderr.mockRestore();
+    }
+    const line = written.find((logged) => logged.startsWith(failed))!;
+    // The spawn's own words name the property; the value they end with is
+    // cut. Only the host's configuration holds it, so only whoever runs the
+    // host can change it.
+    expect(line).toStartWith(`${failed}Child 'leaf' didn't start (launch failed: its spawn refused a value from this ` +
+      'host\'s configuration: ');
+    expect(line).toContain('FLEET_TEST_SECRET');
+    expect(line).toEndWith('(ERR_INVALID_ARG_VALUE)): no process started for it, so there\'s nothing to stop and no ' +
+      'output to quote. Nothing is running, and only whoever runs this host can change that value and restart the ' +
+      'host, so ask them.');
+    expect(written.join('')).not.toContain(secret);
+    const record = made.fleet.getChildren().get('leaf')!;
+    expect(record.status).toBe('crashed');
+    expect(record.autoRestartStopped).toBe('its spawn refused a value from this host\'s configuration, which is not ' +
+      'retried; it can start again once whoever runs this host changes that value and restarts the host');
+    expect(JSON.stringify(made.saved())).not.toContain(secret);
+    expect(JSON.stringify(made.saved())).toContain('ERR_INVALID_ARG_VALUE');
+    expect(readFileSync(join(dataDir, 'startup.log'), 'utf8')).not.toContain(secret);
+  });
+
+  // An ERR_INVALID_ARG_* message whose refused value can't be cut from it
+  // is given as its code alone, and a code its message lacks is added.
+  test('a refused argument\'s message is cut before its value, or given as its code alone', () => {
+    const { fleet } = setup();
+    const failure = (message: string, code: string) => (fleet as unknown as {
+      spawnFailure(child: object): string;
+    }).spawnFailure({ spawnError: Object.assign(new TypeError(message), { code }) });
+    expect(failure('The argument \'args[0]\' must be a string without null bytes. Received \'x\\x00\'', 'ERR_INVALID_ARG_VALUE'))
+      .toBe('its spawn refused a value from this host\'s configuration: The argument \'args[0]\' must be a string ' +
+        'without null bytes. (ERR_INVALID_ARG_VALUE)');
+    expect(failure('The "options.env" property must be of type object, holding secret-env-value', 'ERR_INVALID_ARG_TYPE'))
+      .toBe('its spawn refused a value from this host\'s configuration: ERR_INVALID_ARG_TYPE');
+    expect(failure('bad file descriptor', 'EBADF')).toBe('its spawn failed: bad file descriptor (EBADF)');
+    expect(failure('EBADF: bad file descriptor, posix_spawn \'/usr/bin/bun\'', 'EBADF'))
+      .toBe('its spawn failed: EBADF: bad file descriptor, posix_spawn \'/usr/bin/bun\'');
+    expect(failure('ENOENT: no such file or directory, posix_spawn \'/nonexistent/bun\'', 'ENOENT'))
+      .toBe('its runtime couldn\'t be started: ENOENT: no such file or directory, posix_spawn \'/nonexistent/bun\'');
+  });
+
+  // The spawn, or the check of the data directory before it, would refuse
+  // a NUL byte without saying whose value it was.
+  test('a name, recipe or data directory holding a NUL byte is refused before anything starts, naming the agent\'s field', async () => {
+    const { fleet, dataDir } = setup();
+    const recipe = join(dataDir, '..', 'recipe.json');
+    writeFileSync(recipe, '{}');
+    const refused = async (input: object) => {
+      const result = await fleet.handleToolCall({ id: 'nul', name: 'launch', input });
+      expect(fleet.getChildren().size).toBe(0);
+      expect(fs.existsSync(dataDir)).toBe(false);
+      return result.error;
+    };
+    const refusal = 'Nothing was launched: fleet--launch\'s "recipe" is the recipe\'s path or URL, which can\'t hold a ' +
+      'NUL byte; it got the string "/recipes/leaf\\u0000.json".';
+    expect(await refused({ name: 'leaf', recipe: '/recipes/leaf\0.json', dataDir })).toBe(refusal);
+    expect(await refused({ name: 'leaf', recipe, dataDir: `${dataDir}\0` })).toBe(
+      'Nothing was launched: fleet--launch\'s "dataDir" is the child\'s data directory, which can\'t hold a NUL byte; ' +
+      `it got the string ${JSON.stringify(`${dataDir}\0`)}.`);
+    // A name is refused with a data directory given too, since it would go
+    // raw into the host's log lines.
+    expect(await refused({ name: 'le\0af', recipe, dataDir })).toBe(
+      'Nothing was launched: fleet--launch\'s "name" is the child\'s short name, which can\'t hold a NUL byte; it got ' +
+      'the string "le\\u0000af".');
+    // An env the agent passes is dropped, so it never reaches the spawn: a
+    // value the spawn would refuse launches all the same.
+    const withEnv = await fleet.handleToolCall({ id: 'nul-env', name: 'launch',
+      input: { name: 'leaf', recipe, dataDir, env: { FLEET_TEST_AGENT_ENV: 'agent\0value' } } });
+    expect(withEnv.success).toBe(true);
+    // An autoStart child's configured recipe gets the same refusal, as the
+    // other input checks' do, under the host's log line for that child.
+    const logged: string[] = [];
+    const errors = spyOn(console, 'error').mockImplementation((...args: unknown[]) => { logged.push(args.map(String).join(' ')); });
+    try {
+      const auto = setup({ autoStart: [{ name: 'leaf', recipe: '/recipes/leaf\0.json', dataDir }] });
+      await auto.fleet.start({ getState: () => null, setState: () => {} } as unknown as Parameters<FleetModule['start']>[0]);
+      const autoStart = () => logged.filter((line) => line.startsWith('[fleet] autoStart "leaf"'));
+      await waitFor('the autoStart refusal to be logged', () => autoStart().length > 0);
+      expect(autoStart()).toEqual([`[fleet] autoStart "leaf" failed: ${refusal}`]);
+      expect(auto.fleet.getChildren().has('leaf')).toBe(false);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  // An 'error' for a process that started, such as a kill that failed, is
+  // the host's to log, and changes nothing about the child.
+  test('an error reported for a running child is logged and leaves it running', async () => {
+    const { fleet, launch } = setup();
+    expect((await launch({})).success).toBe(true);
+    const child = fleet.getChildren().get('leaf')!;
+    const errors = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      child.process!.emit('error', Object.assign(new Error('kill EPERM'), { code: 'EPERM' }));
+      expect(errors).toHaveBeenCalledWith(`[fleet] child "leaf" (pid ${child.pid}): kill EPERM`);
+    } finally {
+      errors.mockRestore();
+    }
+    expect(child.status).toBe('ready');
+    expect(child.spawnError).toBeUndefined();
+  });
 });
