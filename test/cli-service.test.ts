@@ -496,7 +496,7 @@ test('the host unit runs start.js with the recipe from the working directory, wi
   const text = readFileSync(hostUnit(at), 'utf-8');
   expect(text).toContain(`WorkingDirectory=${at.work}\n`);
   expect(text).toContain(`ExecStart="/opt/bun/bin/bun" "${at.root}/start.js" "${at.recipe}" "--headless"\n`);
-  expect(text).toContain('Environment="PATH=/opt/bun/bin:/opt/node/bin:/usr/local/bin:/usr/bin:/bin"\n');
+  expect(text).toContain('Environment="PATH=/opt/bun/bin:/opt/node/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"\n');
   expect(text).toContain('Restart=on-failure\n');
   expect(text).toContain('WantedBy=default.target\n');
   expect(statSync(hostUnit(at)).mode & 0o777).toBe(0o600);
@@ -941,7 +941,7 @@ test('the recipe is loaded in the working directory with the unit\'s variables a
   expect(await installService(f.ctx(['install', at.recipe]), f.system)).toBe(0);
   const token = /SESSION_SERVER_TOKEN="([0-9a-f]+)"/.exec(readFileSync(join(at.work, '.env'), 'utf-8'))![1]!;
   expect(f.loads).toEqual([{ recipe: at.recipe, work: at.work, env: {
-    HOME: at.home, USER: 'resident', LOGNAME: 'resident', PATH: '/opt/bun/bin:/opt/node/bin:/usr/local/bin:/usr/bin:/bin',
+    HOME: at.home, USER: 'resident', LOGNAME: 'resident', PATH: '/opt/bun/bin:/opt/node/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
     DATA_DIR: at.data, CONNECTOME_SUPERVISED: '1', CONNECTOME_INSTALL_ROOT: at.root, SESSION_SERVER_PORT: '3100',
     SESSION_SERVER_TOKEN: token,
   } }]);
@@ -1995,6 +1995,7 @@ test('on macOS the host gets a launch agent with KeepAlive on failure, the line,
   expect(text).toContain(`<key>WorkingDirectory</key>\n  <string>${at.work}</string>`);
   expect(text).toContain('<key>CONNECTOME_SUPERVISED</key>\n    <string>1</string>');
   expect(text).toContain(`<key>DATA_DIR</key>\n    <string>${at.data}</string>`);
+  expect(text).toContain('<key>PATH</key>\n    <string>/opt/bun/bin:/opt/node/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>');
   expect(text).toContain('<key>KeepAlive</key>\n  <dict>\n    <key>SuccessfulExit</key>\n    <false/>\n  </dict>');
   expect(text).toContain(`<string>${at.work}/logs/agent.log</string>`);
   expect(f.systemd.calls).toContain(`launchctl bootstrap gui/1001 ${agentPlist(at)}`);

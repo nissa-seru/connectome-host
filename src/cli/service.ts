@@ -273,8 +273,8 @@ async function install(ctx: CliContext, sys: ServiceSystem, root: string, recipe
   for (const unit of units) ownedOrFree(unit, manager, work, sys, env);
   if (manager === 'systemd-user') noOtherHost(ctx, work, names, sys, env);
   const node = sys.which('node');
-  const path = [...new Set([dirname(sys.bun), ...(node ? [dirname(node)] : []), '/usr/local/bin', '/usr/bin', '/bin'])]
-    .join(':');
+  const path = [...new Set([dirname(sys.bun), ...(node ? [dirname(node)] : []), '/usr/local/bin', '/usr/bin', '/bin',
+    '/usr/sbin', '/sbin'])].join(':');
   const hostArgs = [recipe, '--headless'];
   const logPath = join(work, 'logs', 'agent.log');
   const shell = shellBin === null ? null : await shellPlan(sys, work, shellBin);
