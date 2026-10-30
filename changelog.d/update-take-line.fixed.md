@@ -1,0 +1,1 @@
+- Once the release offered is installed, `/update` and bare `connectome` say to take it with the restart alone, where they said to install it and then restart, beside the line saying it was installed. So does the `[update]` line the host logs when it first sees that release offered, if it's installed by then. `lifecycle--update check` gives the same line.

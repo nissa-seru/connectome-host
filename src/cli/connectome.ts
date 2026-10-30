@@ -9,6 +9,8 @@ import { CLI_WAYS, COMMAND_WAYS, statusLines, type UpdateStatus } from '../web/u
 import { STOPPED_READING_MS } from '../client-stall.js';
 import { openHost, type HostClient, type HostEvent, type NoHost } from './host-socket.js';
 import { INSTALL_COMMAND } from './install-command.js';
+import { readServiceRecord, serviceCommand, serviceLines } from './service.js';
+import { SETUP_RECIPE, SETUP_SUMMARY, SETUP_USAGE, firstLine, setup } from './setup.js';
 
 export interface CliContext {
   root: string | null;
@@ -33,6 +35,12 @@ const UPDATE_USAGE = 'connectome update [check | install | restart [wait | now |
   'back [(keep | restore) [<version>]]]';
 
 export const COMMANDS: CliCommand[] = [
+  {
+    name: 'setup',
+    usage: SETUP_USAGE,
+    summary: SETUP_SUMMARY,
+    run: (ctx) => setup({ ...ctx, root: ctx.root ?? resolve(ROOT_IN_WORKDIR) }),
+  },
   {
     name: 'send',
     usage: 'connectome send <text>',
@@ -68,6 +76,15 @@ export const COMMANDS: CliCommand[] = [
         'taken is set aside, not deleted.',
     ],
     run: update,
+  },
+  serviceCommand,
+  {
+    name: 'doctor',
+    usage: 'connectome doctor',
+    summary: 'Checks the install whole, its service, host, recipe, servers and Discord, then shows where an ' +
+      'incoming message got to. Exits 1 when a check finds a problem. The host takes one client at a time, so ' +
+      'doctor\'s connection to it closes another command\'s.',
+    run: async (ctx) => (await import('./doctor.js')).doctor(ctx),
   },
 ];
 
@@ -117,7 +134,8 @@ function usage(print: (line: string) => void): void {
 async function fromPackage(argv: string[]): Promise<number> {
   const root = resolve(ROOT_IN_WORKDIR);
   const command = join(root, INSTALL_COMMAND);
-  if (existsSync(command)) {
+  const [word] = argv;
+  if (existsSync(command) && (word !== 'setup' || existsSync(join(root, 'current', SETUP_RECIPE)))) {
     const ran = spawnSync(process.execPath, [command, ...argv], { stdio: 'inherit' });
     if (ran.error !== undefined) {
       io.err(`connectome: ${command} couldn't be run: ${ran.error.message}`);
@@ -130,11 +148,11 @@ async function fromPackage(argv: string[]): Promise<number> {
     }
     return ran.status ?? 1;
   }
-  const [word] = argv;
   if (isHelp(word)) {
     usage(io.out);
     return 0;
   }
+  if (word === 'setup') return setup({ root, argv: argv.slice(1), ...io });
   if (word !== undefined && !COMMANDS.some((each) => each.name === word)) {
     io.err(`connectome: there's no command ${word}.`);
     usage(io.err);
@@ -145,7 +163,8 @@ async function fromPackage(argv: string[]): Promise<number> {
       `start.js. ${setupAgain(root)}`);
     return 1;
   }
-  io.err(`connectome: there's no connectome-host install here (${process.cwd()}).`);
+  io.err(`connectome: there's no connectome-host install here (${process.cwd()}). In a new directory, ` +
+    `\`${firstLine()}\` sets one up.`);
   return 1;
 }
 
@@ -168,17 +187,17 @@ export async function bare(ctx: CliContext, healthWaitMs = HEALTH_WAIT_MS): Prom
     release = readCurrent(root);
   } catch (error) {
     ctx.err(`connectome: ${root}'s current release can't be read: ${errorText(error)}`);
-    return 1;
+    return Math.max(1, service(ctx));
   }
   ctx.out(`Release: ${release ?? `none is current: run setup again in ${dirname(root)}, which says how to put it right`}`);
   const status = release === null ? 1 : 0;
   const host = await reach(ctx);
-  if (host === null) return 1;
+  if (host === null) return Math.max(1, service(ctx));
   if ('reason' in host) {
     ctx.out(`Its host doesn't answer: ${host.reason}.`);
     if (host.down) ctx.out(startHost(root, 'ask again'));
     ctx.out('Its update state isn\'t known while no host answers.');
-    return status;
+    return Math.max(status, service(ctx));
   }
   ctx.out(`Its host is running: pid ${host.ready.pid}, recipe ${host.ready.recipe}.`);
   if (host.ready.turnWork === undefined) {
@@ -200,7 +219,22 @@ export async function bare(ctx: CliContext, healthWaitMs = HEALTH_WAIT_MS): Prom
     const ways = host.ready.turnWork === undefined ? COMMAND_WAYS : CLI_WAYS;
     for (const line of statusLines(update, ways)) ctx.out(`  ${line}`);
   }
-  return status;
+  return Math.max(status, service(ctx));
+}
+
+function service(ctx: CliContext): number {
+  let lines: string[] | null;
+  try {
+    lines = serviceLines(ctx.root!);
+  } catch (error) {
+    ctx.err(`connectome: ${errorText(error)}`);
+    return 1;
+  }
+  if (lines === null) {
+    ctx.out('connectome service install hasn\'t set up a service for it: connectome service install <recipe> sets one up.');
+  }
+  for (const line of lines ?? []) ctx.out(line);
+  return 0;
 }
 
 export const SEND_QUIET_LIMIT_MS = 15 * 60_000;
@@ -408,8 +442,16 @@ function noHost(ctx: CliContext, host: NoHost): number {
 }
 
 function startHost(root: string, then: string): string {
-  return `If no host is running, have its service start it with \`${startCommand(root)}\`, ` +
-    `followed by the arguments it gives the host now, then ${then}.`;
+  let recorded: boolean;
+  try {
+    recorded = readServiceRecord(root) !== null;
+  } catch {
+    recorded = false;
+  }
+  return recorded
+    ? `If no host is running, start it with \`connectome service start\`, then ${then}.`
+    : `If no host is running, have its service start it with \`${startCommand(root)}\`, followed by the arguments it ` +
+      `gives the host now, then ${then}.`;
 }
 
 function startCommand(root: string): string {

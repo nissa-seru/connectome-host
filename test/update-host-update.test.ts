@@ -910,7 +910,8 @@ test('nothing it reads can make the status throw', () => {
 test("/update's text names an install and a restart under way, and what's installed", () => {
   const base: UpdateStatus = {
     running: '0.12.1', install: true, checks: true, check: null, installing: null, lastInstall: null, installed: null,
-    goBack: null, restart: null, operatorQuiesced: null, switchQuiesceLeft: false, lastSwitch: null, problems: [],
+    goBack: null, restart: null, armed: null, armedDropped: null, operatorQuiesced: null, switchQuiesceLeft: false,
+    lastSwitch: null, problems: [],
   };
   expect(statusLines(base)).toEqual(['connectome-host 0.12.1.', "The registry hasn't been read yet: /update reads it."]);
   expect(statusLines({ ...base, installing: '0.13.0', installed: '0.12.2' }).slice(2))
@@ -981,8 +982,8 @@ describe('/update', () => {
     try {
       const shown: UpdateStatus = {
         running: '0.12.1', install: true, checks: true, check: null, installing: null, lastInstall: null, installed: '0.13.1',
-        goBack: { to: '0.12.0', since: 'then' }, restart: null, operatorQuiesced: null, switchQuiesceLeft: false, lastSwitch: null,
-        problems: [],
+        goBack: { to: '0.12.0', since: 'then' }, restart: null, armed: null, armedDropped: null, operatorQuiesced: null,
+        switchQuiesceLeft: false, lastSwitch: null, problems: [],
       };
       const ways = (Object.keys(COMMAND_WAYS) as UpdateWay[]).filter((way) => way !== 'back' && way !== 'check');
       for (const way of ways) expect((await run(commandFor(way, shown)!)).at(-1)).toBe('answered');

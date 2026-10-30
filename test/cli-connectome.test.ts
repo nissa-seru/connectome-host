@@ -174,6 +174,126 @@ test('a PATH entry that leads to the root through a link counts as the root on P
   expect(writeInstallCommand(root, `/usr/bin:${join(work, 'linked-root')}`).pathLine).toBeNull();
 });
 
+function serviceRecord(root: string, work: string): void {
+  writeFileSync(join(root, 'service.json'), JSON.stringify({
+    v: 1, manager: 'systemd-user', units: { host: { name: 'connectome-x.service', file: '/u/connectome-x.service' } },
+    hostArgs: [join(work, 'r.json'), '--headless'], workingDirectory: work, logs: { kind: 'journal' },
+  }));
+}
+
+function expectServiceLines(out: string): void {
+  expect(out).toContain('journalctl --user -u connectome-x.service -f');
+  expect(out).toContain('  stop it: connectome service stop');
+  expect(out).toContain('  start it: connectome service start');
+}
+
+test('bare shows the recorded service\'s log, stop and start lines, and with none recorded, how to set one up', async () => {
+  const { root, work } = install();
+  const { path } = writeInstallCommand(root, '');
+  const none = await run(path, [], root);
+  expect(none.status).toBe(0);
+  expect(none.out).toContain('connectome service install <recipe>');
+  serviceRecord(root, work);
+  const ran = await run(path, [], root);
+  expect(ran.status).toBe(0);
+  expectServiceLines(ran.out);
+});
+
+test('bare with its host running shows the recorded service\'s lines too', async () => {
+  const { root, work, data } = install();
+  const { path } = writeInstallCommand(root, '');
+  serviceRecord(root, work);
+  await fakeHost(data, (message, reply) => {
+    if (message.type === 'panel-request' && message.op === 'health') {
+      reply({ type: 'panel-response', corrId: message.corrId, op: 'health', ok: true, data: { update: STATUS } });
+    }
+  });
+  const ran = await run(path, [], root);
+  expect(ran.status).toBe(0);
+  expect(ran.out).toContain('Its host is running: pid 4242');
+  expectServiceLines(ran.out);
+});
+
+test('with a service recorded and no host running, bare, send and update say to start it with connectome service start', async () => {
+  const { root, work } = install();
+  const { path } = writeInstallCommand(root, '');
+  serviceRecord(root, work);
+  const bare = await run(path, [], root);
+  expect(bare.out).toContain('If no host is running, start it with `connectome service start`, then ask again.');
+  expect(bare.out).not.toContain('have its service start it with');
+  const sent = await run(path, ['send', 'hello'], root);
+  expect(sent.status).toBe(1);
+  expect(sent.err).toContain('If no host is running, start it with `connectome service start`, then send again.');
+  expect(sent.err).not.toContain('have its service start it with');
+  const asked = await run(path, ['update'], root);
+  expect(asked.status).toBe(1);
+  expect(asked.err).toContain('If no host is running, start it with `connectome service start`, then ask again.');
+  writeFileSync(join(root, 'service.json'), 'not json');
+  const unread = await run(path, ['send', 'hello'], root);
+  expect(unread.status).toBe(1);
+  expect(unread.err).toContain('If no host is running, have its service start it with');
+  expect(unread.err).not.toContain('    at ');
+});
+
+test('bare whose host can\'t be looked for still shows the service\'s lines, and exits 1', async () => {
+  const { root, work } = install();
+  const { path } = writeInstallCommand(root, '');
+  serviceRecord(root, work);
+  writeFileSync(join(root, 'install.json'), JSON.stringify({ v: 1, dataDir: 'data', extraState: [] }));
+  const ran = await run(path, [], root);
+  expect(ran.status).toBe(1);
+  expect(ran.err).toContain('not an absolute path');
+  expectServiceLines(ran.out);
+});
+
+test('bare writes the service\'s lines through the context it\'s given', async () => {
+  const { root, work } = install();
+  serviceRecord(root, work);
+  const out: string[] = [];
+  const status = await bare({ root, argv: [], out: (line) => out.push(line), err: (line) => out.push(line) }, 300);
+  expect(status).toBe(0);
+  expectServiceLines(out.join('\n'));
+});
+
+test('bare whose current release can\'t be read still shows the service\'s lines, and exits 1', async () => {
+  const { root, work } = install();
+  serviceRecord(root, work);
+  rmSync(installPaths(root).current, { force: true });
+  writeFileSync(installPaths(root).current, 'not a link');
+  const out: string[] = [];
+  const err: string[] = [];
+  const status = await bare({ root, argv: [], out: (line) => out.push(line), err: (line) => err.push(line) }, 300);
+  expect(status).toBe(1);
+  expect(err.join('\n')).toContain('current release can\'t be read');
+  expectServiceLines(out.join('\n'));
+});
+
+test('bare whose host answers, with a service record it can\'t read, names the file and exits 1', async () => {
+  const { root, data } = install();
+  writeFileSync(join(root, 'service.json'), 'not json');
+  await fakeHost(data, (message, reply) => {
+    if (message.type === 'panel-request' && message.op === 'health') {
+      reply({ type: 'panel-response', corrId: message.corrId, op: 'health', ok: true, data: { update: STATUS } });
+    }
+  });
+  const out: string[] = [];
+  const err: string[] = [];
+  const status = await bare({ root, argv: [], out: (line) => out.push(line), err: (line) => err.push(line) }, 300);
+  expect(status).toBe(1);
+  expect(out.join('\n')).toContain('Its host is running: pid 4242');
+  expect(err.join('\n')).toContain(join(root, 'service.json'));
+});
+
+test('bare with a service record it can\'t read names the file and exits 1', async () => {
+  const { root } = install();
+  const { path } = writeInstallCommand(root, '');
+  writeFileSync(join(root, 'service.json'), 'not json');
+  const ran = await run(path, [], root);
+  expect(ran.status).toBe(1);
+  expect(ran.err).toContain(join(root, 'service.json'));
+  expect(ran.err).not.toContain('    at ');
+});
+
 test('an install\'s own command, or a link to it, runs the release its current names, with the words given', async () => {
   const { root } = install();
   const { path } = writeInstallCommand(root, '');
@@ -235,6 +355,19 @@ test('help lists the commands, and a word that isn\'t one is a usage error', asy
   const wrong = await run(path, ['frobnicate'], root);
   expect(wrong.status).toBe(2);
   expect(wrong.err).toContain('there\'s no command frobnicate');
+});
+
+test('service is one of the commands: help lists its install, stop and start, and service with none of them is its usage error', async () => {
+  const { root } = install();
+  const { path } = writeInstallCommand(root, '');
+  const help = await run(path, ['help'], root);
+  expect(help.out).toContain('  connectome service install [<recipe>] | stop | start\n');
+  for (const word of ['install: writes and starts', 'stop: stops', 'start: starts']) {
+    expect(help.out).toContain(`\n        ${word} `);
+  }
+  const wrong = await run(path, ['service'], root);
+  expect(wrong.status).toBe(2);
+  expect(wrong.err).toBe('Usage: connectome service install [<recipe>] | stop | start\n');
 });
 
 test('the package\'s bin, in a directory with an install, runs that install\'s own command', async () => {

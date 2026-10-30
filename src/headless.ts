@@ -42,6 +42,8 @@ import {
   PANEL_OPS_THAT_CHANGE_THE_SESSION, operatorWorkRunning, refusedWhileSwitching, switchLeftForStop, trackOperatorWork,
 } from './session-switch.js';
 import { STOPPED_READING_MS, watchForStall } from './client-stall.js';
+import { randomUUID } from 'node:crypto';
+import { SURFACE_TAG_KEY, surfaceAnswers } from './modules/tui-module.js';
 
 interface HeadlessOptions {
   socketPath?: string;
@@ -157,6 +159,10 @@ export async function runHeadless(app: AppContext, argv: string[] = [], testing:
   let currentClient: Socket | null = null;
   let stalling: (() => void) | null = null;
   const superseded = new WeakSet<Socket>();
+  const connectionIds = new WeakMap<Socket, string>();
+  const consoleClients = new WeakSet<Socket>();
+  let speechWritten: { text: string; client: Socket } | null = null;
+  let stopAnswering = (): void => {};
   const stoppedReadingMs = testing.stoppedReadingMs ?? STOPPED_READING_MS;
   // Framework events from before the first client connected, sent to it on
   // connect so a parent that attaches after the boot still hears it (the
@@ -249,11 +255,13 @@ export async function runHeadless(app: AppContext, argv: string[] = [], testing:
     }
     emit(event);
   };
-  // `inference:speech` fires once per "final" inference round — the round
-  // that completed without yielding tool calls.  It carries the accumulated
-  // speech text, letting the parent implement fleet--relay without having
-  // to subscribe to the whole token stream.
+  // agent-framework traces inference:completed also when an end-turn tool
+  // ends a stream after its tool round, traces inference:stream_resumed only
+  // when it gives a live stream its tool results, and marks a start `silent`
+  // for a wake that must not surface prose (a silent heartbeat).
   let currentSpeech = '';
+  let roundOpen = false;
+  let silentStream = false;
 
   const idleTrace = (event: unknown): void => {
     const t = (event as { type?: string }).type;
@@ -270,17 +278,30 @@ export async function runHeadless(app: AppContext, argv: string[] = [], testing:
         turnWorkDoneSince = 0;
       }
       exitSince = 0;
-      if (agentName === primaryAgentName) currentSpeech = '';
+      if (agentName === primaryAgentName) {
+        currentSpeech = '';
+        silentStream = (event as { silent?: unknown }).silent === true;
+        roundOpen = !silentStream;
+        speechWritten = null;
+      }
     } else if (t === 'inference:tokens' && agentName === primaryAgentName) {
-      const content = (event as { content?: string }).content;
-      if (content) currentSpeech += content;
+      const { content, blockType } = event as { content?: string; blockType?: string };
+      if (content && blockType === 'text') currentSpeech += content;
+    } else if (t === 'inference:stream_resumed' && agentName === primaryAgentName) {
+      roundOpen = !silentStream;
     } else if (t === 'inference:tool_calls_yielded' && agentName === primaryAgentName) {
       currentSpeech = '';
+      roundOpen = false;
     } else if (t === 'inference:completed' && agentName === primaryAgentName) {
-      if (currentSpeech) {
+      if (roundOpen) {
+        const client = currentClient;
         emit({ type: 'inference:speech', agentName, content: currentSpeech });
+        if (currentSpeech && client && !client.destroyed && !client.writableEnded && matchesSubscription('inference:speech', subscription)) {
+          speechWritten = { text: currentSpeech, client };
+        }
       }
       currentSpeech = '';
+      roundOpen = false;
     }
   };
   let traced = app.framework;
@@ -372,11 +393,12 @@ export async function runHeadless(app: AppContext, argv: string[] = [], testing:
         turnWorkDoneEmitted = false;
         turnWorkDoneSince = 0;
         exitSince = 0;
+        if (cmd.from === 'console') consoleClients.add(requester);
         pushText({
           type: 'external-message',
           source: cmd.from === 'console' ? 'cli' : 'headless',
           content: cmd.content,
-          metadata: {},
+          metadata: { [SURFACE_TAG_KEY]: { surface: 'headless', connection: connectionIds.get(requester) } },
           triggerInference: true,
         });
         return;
@@ -622,6 +644,7 @@ export async function runHeadless(app: AppContext, argv: string[] = [], testing:
       try { currentClient.end(); } catch { }
     }
     currentClient = socket;
+    connectionIds.set(socket, randomUUID());
     stalling = watchForStall(socket, stoppedReadingMs, (unsent) => {
       log(`${superseded.has(socket) ? 'superseded client' : 'client'} hadn't taken what was queued for it within ${stoppedReadingMs / 1000} s; closed with ${unsent} bytes unsent`);
       socket.destroy();
@@ -747,6 +770,7 @@ export async function runHeadless(app: AppContext, argv: string[] = [], testing:
       exitCode = 1;
       log(`framework.stop() failed: ${String(err)}`);
     }
+    stopAnswering();
     try { server.close(); } catch (err) { log(`server.close() failed: ${String(err)}`); }
     try { if (existsSync(socketPath)) unlinkSync(socketPath); } catch (err) { log(`socket unlink failed: ${String(err)}`); }
     try { if (existsSync(pidPath)) unlinkSync(pidPath); } catch (err) { log(`pid unlink failed: ${String(err)}`); }
@@ -760,6 +784,7 @@ export async function runHeadless(app: AppContext, argv: string[] = [], testing:
   hostUpdate.attachStop({
     supervised: true,
     stop: (reason, farewell) => { log(farewell); void gracefulShutdown(reason, RESTART_EXIT_CODE); },
+    stopping: () => app.stopping === true,
   });
 
   // `lifecycle:idle` fires once quiet follows an inference:started or a text, so the
@@ -771,13 +796,33 @@ export async function runHeadless(app: AppContext, argv: string[] = [], testing:
   // nothing at all has been in flight for the same 500 ms.
   {
     const IDLE_CONFIRM_MS = 500;
+    let lastTryLogged = '';
+    const logTry = (since: string, text: string) => {
+      if (`${since} ${text}` !== lastTryLogged) log(`[update] ${text}`);
+      lastTryLogged = `${since} ${text}`;
+    };
     let windowArmed = false;
+
+    stopAnswering = surfaceAnswers.answerFor('headless', ({ agentName, text, final, connections }) => {
+      if (agentName !== primaryAgentName || !final) return undefined;
+      const bare = (words: string): string => words.replace(/\s+/g, '');
+      const shown = speechWritten && bare(speechWritten.text).includes(bare(text)) ? speechWritten.client : undefined;
+      if (!shown) return undefined;
+      const id = connectionIds.get(shown);
+      const what = consoleClients.has(shown) ? 'the terminal' : 'the client';
+      const how = consoleClients.has(shown) ? ' (`connectome send`)' : " on this host's socket";
+      return id !== undefined && connections.includes(id)
+        ? `${what} that sent this turn${how}`
+        : `${what} now connected${how}, not the one that sent this turn`;
+    });
 
     const idlePoll = setInterval(() => {
       if (app.stopping) { clearInterval(idlePoll); return; }
       const agents = app.framework.getAllAgents();
       const allIdle = agents.every((a) => a.state.status === 'idle');
-      const armed = selfRestart.isArmed();
+      const restartArmed = selfRestart.isArmed();
+      const updateArmed = hostUpdate.armedSwitch() !== null;
+      const armed = restartArmed || updateArmed;
       if (armed) hadAtLeastOneInference = true;
       if (armed !== windowArmed) { windowArmed = armed; idleSince = 0; exitSince = 0; }
       const turnWork = turnWorkInFlight();
@@ -813,9 +858,20 @@ export async function runHeadless(app: AppContext, argv: string[] = [], testing:
       }
       if (exitSince === 0) { exitSince = now; return; }
       if (now - exitSince < IDLE_CONFIRM_MS || !idleEmitted) return;
-      if (armed) {
+      if (restartArmed) {
         clearInterval(idlePoll);
         void gracefulShutdown('self-restart', SELF_RESTART_EXIT_CODE);
+        return;
+      }
+      if (updateArmed) {
+        const since = hostUpdate.armedSwitch()?.since ?? '';
+        if (hostUpdate.armedDue()) {
+          const quietNow = () => app.framework.getAllAgents().every((a) => a.state.status === 'idle') && nothingInFlight();
+          void hostUpdate.runArmed(quietNow).then(
+            (answer) => { if (!answer.done) logTry(since, answer.lines.join(' ')); },
+            (err) => { logTry(since, `The armed update's try failed: ${String(err)}`); },
+          );
+        }
         return;
       }
       if (opts.exitWhenIdle) {

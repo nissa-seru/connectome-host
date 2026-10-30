@@ -1271,6 +1271,27 @@ export interface RecipeModules {
    * the agent stays down after its own request.
    */
   selfRestart?: boolean | { cooldownMinutes?: number };
+  /**
+   * The setup agent's two tools, `setup--run` and `setup--ask_secret`, for `connectome setup`'s own recipe.
+   * They run only in readline mode with stdin and stdout on a terminal, the one `ask_secret` asks the person on.
+   */
+  setup?: boolean;
+
+  /**
+   * The agent's own update (`lifecycle--update`). Off by default. The agent
+   * can check for, install, restart onto or go back from a release of its
+   * own install, as `/update` does. A restart or Go back begins at the
+   * host's first quiet moment, once nothing the host counts as in flight
+   * is still going here, such as a turn, subagent run, background script,
+   * session switch, operator's work or credential action, and each fleet
+   * child says nothing is going there, such as a turn or background script,
+   * and is
+   * armed only on a host whose environment at its start holds
+   * `CONNECTOME_SUPERVISED=1`, which the service written by `connectome service
+   * install` sets only if that service starts the host again when it exits
+   * with 75 and when it exits with 1.
+   */
+  selfUpdate?: boolean;
 }
 
 export interface RecipeWebUi {
@@ -1637,7 +1658,7 @@ export const DEFAULT_RECIPE: Recipe = {
   },
 };
 
-const ENV_REFERENCE = String.raw`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}`;
+export const ENV_REFERENCE = String.raw`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}`;
 
 export function namesEnvReference(text: string): boolean {
   return new RegExp(ENV_REFERENCE).test(text);
@@ -1645,7 +1666,8 @@ export function namesEnvReference(text: string): boolean {
 
 /**
  * Walk a parsed-JSON value tree and substitute `${VAR_NAME}` patterns in
- * string values with `process.env.VAR_NAME`. Applied at recipe-load time,
+ * string values with `env.VAR_NAME`, `env` being process.env unless
+ * another is given. Applied at recipe-load time,
  * before schema validation, so secrets can live in `.env` (gitignored)
  * while the recipe itself stays commit-safe.
  *
@@ -1664,12 +1686,16 @@ export function namesEnvReference(text: string): boolean {
  * No escape syntax yet — a literal `${...}` in recipe JSON is not a
  * supported case.
  */
-export function substituteEnvVars(value: unknown, source: string): unknown {
+export function substituteEnvVars(
+  value: unknown,
+  source: string,
+  env: Record<string, string | undefined> = process.env,
+): unknown {
   if (typeof value === 'string') {
     return value.replace(
       new RegExp(ENV_REFERENCE, 'g'),
       (_match, name: string, defaultValue: string | undefined) => {
-        const v = process.env[name];
+        const v = env[name];
         if (defaultValue !== undefined) {
           return v !== undefined && v !== '' ? v : defaultValue;
         }
@@ -1686,12 +1712,12 @@ export function substituteEnvVars(value: unknown, source: string): unknown {
     );
   }
   if (Array.isArray(value)) {
-    return value.map((v) => substituteEnvVars(v, source));
+    return value.map((v) => substituteEnvVars(v, source, env));
   }
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = substituteEnvVars(v, source);
+      out[k] = substituteEnvVars(v, source, env);
     }
     return out;
   }
@@ -1709,7 +1735,10 @@ export async function loadRecipe(source: string): Promise<Recipe> {
   return (await loadRecipeDetailed(source)).recipe;
 }
 
-export async function loadRecipeDetailed(source: string, options: { fetchSystemPrompt?: boolean } = {}): Promise<LoadedRecipe> {
+export async function loadRecipeDetailed(
+  source: string,
+  options: { fetchSystemPrompt?: boolean; env?: Record<string, string | undefined> } = {},
+): Promise<LoadedRecipe> {
   let raw: unknown;
   let sourceBase: RecipeSourceBase;
 
@@ -1742,11 +1771,11 @@ export async function loadRecipeDetailed(source: string, options: { fetchSystemP
 
   const persistable = structuredClone(raw) as Record<string, unknown>;
 
-  raw = substituteEnvVars(raw, source);
+  raw = substituteEnvVars(raw, source, options.env);
   const recipe = validateRecipe(raw);
   resolveChildRecipePaths(recipe, sourceBase);
   resolveExtensionPaths(recipe, sourceBase);
-  const resolved = options.fetchSystemPrompt === false ? recipe : refuseUnfit(await resolveSystemPrompt(recipe));
+  const resolved = options.fetchSystemPrompt === false ? recipe : refuseUnfit(await resolveSystemPrompt(recipe), options.env);
   copyResolvedPathsIntoRaw(persistable, resolved);
   return { recipe: resolved, persistable };
 }
@@ -1832,8 +1861,8 @@ export function runningFit(recipe: Recipe, envModel: string | undefined): Recipe
   };
 }
 
-function refuseUnfit(recipe: Recipe): Recipe {
-  const fit = runningFit(recipe, process.env.MODEL || undefined);
+function refuseUnfit(recipe: Recipe, env: Record<string, string | undefined> = process.env): Recipe {
+  const fit = runningFit(recipe, env.MODEL || undefined);
   if (fit.checked && !fit.fits) throw new Error(fit.refusal);
   return recipe;
 }
@@ -1981,7 +2010,7 @@ const RECIPE_AGENT_MOCK_KEYS = [
 const RECIPE_MODULE_KEYS = [
   'subagents', 'lessons', 'retrieval', 'wake', 'workspace', 'instructions', 'activity', 'notices',
   'mcplAdmin', 'history', 'identity', 'fleet', 'webui', 'ttsRelay', 'subscriptionGc',
-  'channelMode', 'selfRestart', 'heartbeat',
+  'channelMode', 'selfRestart', 'heartbeat', 'setup', 'selfUpdate',
 ] as const;
 const RECIPE_KV_UNIFIED_KEYS = [
   'policy', 'tokenBucketSize', 'continuityBucketSize', 'fidelityBucketSize', 'labelCeiling',
@@ -3211,6 +3240,14 @@ export function validateRecipe(raw: unknown): Recipe {
       if (cd !== undefined && (typeof cd !== 'number' || !Number.isFinite(cd) || cd < 0)) {
         throw new Error('modules.selfRestart.cooldownMinutes must be a non-negative number of minutes');
       }
+    }
+
+    if (mods.setup !== undefined && typeof mods.setup !== 'boolean') {
+      throw new Error('modules.setup must be true or false');
+    }
+
+    if (mods.selfUpdate !== undefined && typeof mods.selfUpdate !== 'boolean') {
+      throw new Error('modules.selfUpdate must be true or false');
     }
 
     if (mods.ttsRelay !== undefined && mods.ttsRelay !== false) {

@@ -18,11 +18,30 @@ else. It started as a knowledge-mining TUI, and those recipes still ship
 
 Built on the Connectome stack: [@animalabs/agent-framework](https://github.com/anima-research/agent-framework) + [@animalabs/context-manager](https://github.com/anima-research/context-manager) + [@animalabs/chronicle](https://github.com/anima-research/chronicle) + [@animalabs/membrane](https://github.com/anima-research/membrane).
 
+## A resident, from one line
+
+On the machine the resident will live on, in a new directory:
+
+```bash
+bunx @animalabs/connectome-host setup discord
+```
+
+If `bunx` doesn't have the package yet, it first downloads it and what it
+depends on, showing its own progress, before setup says anything.
+
+The host's own agent sets the resident up from there, and asks you only what
+only you can answer. Afterwards the install's own `connectome` command looks
+after it: `./connectome-host/connectome` in that directory, or plain
+`connectome` once its directory is on your PATH, as setup shows. With nothing
+after it, it says how the install is. Type the package's whole name,
+`bunx @animalabs/connectome-host`, and never `bunx connectome`, which is
+another package on npm.
+
 ## What people run on it
 
 | Use | Start here |
 |---|---|
-| **A resident** — a persistent agent on Discord (or other surfaces), headless on a VPS, with autobiographical memory | [`docs/AGENT-ONBOARDING.md`](docs/AGENT-ONBOARDING.md), [`docs/DEPLOYMENTS.md`](docs/DEPLOYMENTS.md) |
+| **A resident** — a persistent agent on Discord (or other surfaces), headless on a VPS, with autobiographical memory | `bunx @animalabs/connectome-host setup discord` (above), which hands over to the setup agent's guide, [`docs/AGENT-ONBOARDING.md`](docs/AGENT-ONBOARDING.md); [`docs/DEPLOYMENTS.md`](docs/DEPLOYMENTS.md) for running one |
 | **A continued conversation** — bring a claude.ai conversation, a Claude Code session or a Codex rollout across and keep going | [`docs/claudeai-evacuation.md`](docs/claudeai-evacuation.md), [`docs/claude-code-ingest.md`](docs/claude-code-ingest.md), `scripts/import-codex-rollout.ts` |
 | **A fleet** — a conductor agent supervising headless child processes, one agent tree in the TUI and WebUI | [`docs/fleet-protocol.md`](docs/fleet-protocol.md), [`recipes/TRIUMVIRATE-SETUP.md`](recipes/TRIUMVIRATE-SETUP.md) |
 | **Knowledge mining** — miner / reviewer / clerk agents over Zulip and GitLab | [`recipes/SETUP.md`](recipes/SETUP.md), [`docs/LIBRARY-PIPELINE.md`](docs/LIBRARY-PIPELINE.md) |
@@ -165,7 +184,8 @@ number to change. Set a `strategy` block only to tune windows/budgets, to pin
 `foldingStrategy: "kv-stable"` for a resident whose store was built under it,
 or to opt into a different strategy type (`frontdesk`
 for channel-staffing agents, `passthrough` for none) — see
-`docs/AGENT-ONBOARDING.md` for sizing guidance on long-lived agents and
+`docs/DEPLOYMENTS.md`'s "A resident's memory: sizing, folding and repair" for
+sizing guidance on long-lived agents and
 [`docs/AGENT-MEMORY-GUIDE.md`](docs/AGENT-MEMORY-GUIDE.md) for how it works.
 
 `maintenanceIntervalMs`, at the recipe's top level, is how often
@@ -422,7 +442,8 @@ Set it in the recipe, in `mcpl-servers.json`, or (for an agent's own servers) wi
 | [`recipes/mcpl-editor-test.json`](recipes/mcpl-editor-test.json), [`webui-test.json`](recipes/webui-test.json), [`webui-fleet-test.json`](recipes/webui-fleet-test.json) | Development test recipes |
 
 The production residents' recipes live in their own install directories, not
-here; [`docs/AGENT-ONBOARDING.md`](docs/AGENT-ONBOARDING.md) shows the shape.
+here; [`docs/AGENT-ONBOARDING.md`](docs/AGENT-ONBOARDING.md)'s "The recipe" and
+"The recipe's servers" show the shape of a new one.
 
 ### Claude subscription provider
 
@@ -453,6 +474,19 @@ action is pasting a new token. A credentials file with a refresh token
 30 minutes before expiry. See the credential-alerts note under the ChatGPT
 provider and [docs/subscription-transport.md](docs/subscription-transport.md).
 
+### Anthropic effort
+
+For Anthropic streaming turns, `agent.thinking.effort` sets the recipe's
+baseline effort, whether or not `agent.thinking.enabled` is on. An effort set
+explicitly with `agent_settings` (in the agent's built-in `settings` toolset,
+or its tool list if its `allowedTools` doesn't permit both `toolsets--open`
+and `toolsets--act`) overrides it until reset, from the point where it was
+set. A model that doesn't take the effort level gets none, the
+model's default applies, and stderr says so once (`[reasoning-effort] <model>
+does not accept effort=<level> — not sent`). Compression calls are unaffected,
+and other providers ignore the field: OpenAI recipes use
+`agent.responses.reasoningEffort`, below.
+
 ### OpenAI reasoning
 
 For `openai-responses` and `openai-codex`, primary-agent reasoning is configured
@@ -476,7 +510,7 @@ The host accepts `none`, `low`, `medium`, `high`, `xhigh`, or `max` for
 selected model must support the requested effort. These settings apply to the
 primary agent; `modules.retrieval` has its own reasoning setting described below.
 Memory sizing and compression-model settings are covered in
-`docs/AGENT-ONBOARDING.md`.
+`docs/DEPLOYMENTS.md`'s "A resident's memory: sizing, folding and repair".
 
 ### ChatGPT subscription provider
 
@@ -662,6 +696,7 @@ unknown-key warning, like those at the other levels.
 - **TUI, readline and batch modes** — OpenTUI interactive terminal, `--no-tui` for a plain prompt, or piped stdin for a one-shot batch run
 - **Headless mode** — `--headless`: no terminal, JSONL over a Unix socket; how residents run under a supervisor
 - **Self-restart** (opt-in, `modules.selfRestart`) — `lifecycle--restart`: the agent restarts its own host, for an edited recipe or rebuilt code. It happens once the asking turn has ended; the host exits with code 75 for its supervisor to start it again, so enable it only under one that does (launchd `KeepAlive`, systemd `Restart=on-failure`, a fleet parent's `autoRestart`, which is off unless the child's entry sets it, and which counts a self-restart toward its cap of 3 restarts in 60 s). A fleet parent's own self-restart stops its children as any shutdown does, and the restarted parent starts again only its `autoStart` children. `cooldownMinutes` (default 10) spaces restarts out
+- **Self-update** (opt-in, `modules.selfUpdate`) — `lifecycle--update`: the agent's own `/update`. It checks what's out, installs a release beside the running one, and arms a restart onto it or a Go back for the host's first quiet moment, once nothing the host counts as in flight is still going here, such as a turn, subagent run, background script, session switch, operator's work or credential action, and each fleet child says nothing is going there, such as a turn or background script. A restart or Go back arms only on a headless host started with `CONNECTOME_SUPERVISED=1`, which `connectome service install` sets only for a service that restarts the host when it exits with 75 and with 1; anywhere else it refuses and says why. The changelog's entry has the rest
 - **Time-travel** — Chronicle-backed undo/redo, checkpoints, branch exploration; in the web UI, rolling back to a message and suppressing messages
 - **Session management** — isolated sessions with auto-naming
 - **Ops alerts** — compression quarantine, refusal streaks, inference exhaustion and more surface as `ops:alert` traces, `logs/failures.log` records, and an optional webhook (`CONNECTOME_OPS_WEBHOOK`)

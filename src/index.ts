@@ -58,7 +58,7 @@ import { historyModuleOptions, assertSemanticSearchRegistered } from './history-
 import { LessonsModule } from './modules/lessons-module.js';
 import { RetrievalModule } from './modules/retrieval-module.js';
 import { retrievalModuleConfig } from './retrieval-config.js';
-import { TuiModule } from './modules/tui-module.js';
+import { SURFACE_TAG_KEY, TuiModule, readlineAnswer, surfaceAnswers } from './modules/tui-module.js';
 import { TimeModule } from './modules/time-module.js';
 import { waitToBeListed } from './fleet-begin.js';
 import { FleetModule, type FleetModuleConfig } from './modules/fleet-module.js';
@@ -71,9 +71,11 @@ import { ObserversModule } from './modules/observers-module.js';
 import { IdentityModule } from './modules/identity-module.js';
 import { McplAdminModule } from './modules/mcpl-admin-module.js';
 import { LifecycleModule } from './modules/lifecycle-module.js';
+import { SetupModule, type SecretAsker } from './modules/setup-module.js';
+import { askHidden } from './setup/terminal-secret.js';
 import { TtsRelayModule } from './modules/tts-relay-module.js';
 import { InstructionsModule } from './modules/instructions-module.js';
-import { loadMcplServers, applyAgentOverlay, mergeRecipeServers, composeMcplChildEnv, overlayWarnings, DEFAULT_CONFIG_PATH, DEFAULT_AGENT_OVERLAY_PATH } from './mcpl-config.js';
+import { serversForRecipe, composeMcplChildEnv, overlayWarnings, DEFAULT_CONFIG_PATH, DEFAULT_AGENT_OVERLAY_PATH } from './mcpl-config.js';
 import { toolClassConfig } from './tool-lifecycle-config.js';
 import { batchModeStartNotice, batchTeardownNotice, batchWebUiNotice, batchEchoLine, BATCH_MCPL_LOG_NOTE } from './batch-mode.js';
 import { createPipedTurns, switchFollowing, traceFollower } from './piped-turns.js';
@@ -248,6 +250,7 @@ function resolveModel(recipe: Recipe): string {
 let noticesRef: NoticesModule | null = null;
 let instructionsRef: InstructionsModule | null = null;
 let installHere: ReleaseHere | null = null;
+let terminalAsker: SecretAsker | null = null;
 
 async function createFramework(
   membrane: Membrane,
@@ -413,12 +416,26 @@ async function createFramework(
     moduleInstances.push(mcplAdminModule);
   }
 
-  if (modules.selfRestart !== undefined && modules.selfRestart !== false) {
+  const selfRestartOn = modules.selfRestart !== undefined && modules.selfRestart !== false;
+  if (selfRestartOn || modules.selfUpdate === true) {
     const srCfg = typeof modules.selfRestart === 'object' ? modules.selfRestart : {};
     moduleInstances.push(new LifecycleModule({
       dataDir: resolve(config.dataDir),
       timeZone,
+      selfRestart: selfRestartOn,
+      selfUpdate: modules.selfUpdate === true,
       ...(srCfg.cooldownMinutes !== undefined ? { cooldownMinutes: srCfg.cooldownMinutes } : {}),
+    }));
+  }
+
+  if (modules.setup === true) {
+    if (!noTui || !process.stdin.isTTY || !process.stdout.isTTY) {
+      throw new Error('modules.setup runs only in readline mode with stdin and stdout on a terminal, as ' +
+        '`connectome setup` starts it: setup--ask_secret asks the person on that terminal, with nothing typed shown.');
+    }
+    moduleInstances.push(new SetupModule({
+      dir: process.env.CONNECTOME_SETUP_DIR || process.cwd(), env: process.env, asker: () => terminalAsker,
+      show: (line) => console.log(line),
     }));
   }
 
@@ -466,16 +483,10 @@ async function createFramework(
     moduleInstances.push(instance);
   }
 
-  const recipeServers = recipe.mcpServers ?? {};
-  const fileServers = loadMcplServers(DEFAULT_CONFIG_PATH);
-
-  const allServers = mergeRecipeServers(
-    recipeServers as unknown as Record<string, Record<string, unknown>>,
-    fileServers as unknown as Array<{ id: string } & Record<string, unknown>>,
-  );
+  const { listed: allServers, loaded } = serversForRecipe(recipe.mcpServers, DEFAULT_CONFIG_PATH, DEFAULT_AGENT_OVERLAY_PATH);
 
   for (const line of overlayWarnings(allServers, DEFAULT_AGENT_OVERLAY_PATH)) console.warn(line);
-  const finalServers = applyAgentOverlay(allServers, DEFAULT_AGENT_OVERLAY_PATH).map((server) => {
+  const finalServers = loaded.map((server) => {
     const withEnv: { id: string; command?: string; url?: string; [k: string]: unknown } = {
       ...server,
       env: composeMcplChildEnv(server.env as Record<string, string> | undefined, timeZone),
@@ -719,6 +730,7 @@ async function runPiped(app: AppContext) {
     if (e.type === 'ops:alert') onAlert?.(e);
   });
   traces.follow(app.framework);
+  surfaceAnswers.answerFor('readline', readlineAnswer(!!process.stdout.isTTY));
   let afterSwitch = (): void => {};
 
   async function processLine(line: string): Promise<boolean> {
@@ -751,7 +763,7 @@ async function runPiped(app: AppContext) {
     } else {
       app.framework.pushEvent({
         type: 'external-message', source: 'cli',
-        content: trimmed, metadata: {}, triggerInference: true,
+        content: trimmed, metadata: { [SURFACE_TAG_KEY]: { surface: 'readline' } }, triggerInference: true,
       });
       await turns.waitForTurn();
     }
@@ -799,10 +811,14 @@ async function runPiped(app: AppContext) {
     afterSwitch = () => { alerts.clear(); };
     let restarting = false;
     hostUpdate.attachStop({ supervised: false, stop: () => { restarting = true; setTimeout(() => { rl.close(); }, 0); } });
+    terminalAsker = {
+      ask: async (name, purpose) =>
+        (await askHidden(rl, process.stdout, `${name} (${purpose}), typed hidden (Enter alone declines)`)) || null,
+    };
     console.log('connectome-host (readline mode). Type /help for commands.');
     if (terminal.logging()) terminal.say(`Error log: ${terminal.logPath}`);
     let closed = false;
-    rl.on('close', () => { closed = true; atPrompt = false; });
+    rl.on('close', () => { terminalAsker = null; closed = true; atPrompt = false; });
     rl.prompt();
     atPrompt = true;
     rl.on('line', async (line: string) => {

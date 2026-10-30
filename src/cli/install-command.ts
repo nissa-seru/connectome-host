@@ -38,10 +38,10 @@ export function installCommandText(): string {
   ].join('\n');
 }
 
-export function writeInstallCommand(root: string, path: string | undefined = process.env.PATH):
+/** An install's own command's path, and the line that puts its directory on PATH, or null where it's on PATH,
+ *  each directory compared by its real path. */
+export function installCommandOf(root: string, path: string | undefined = process.env.PATH):
   { path: string; pathLine: string | null } {
-  const at = join(root, INSTALL_COMMAND);
-  writeTextAtomic(at, installCommandText(), 0o755);
   const real = (dir: string) => {
     try {
       return realOrResolved(dir);
@@ -51,5 +51,12 @@ export function writeInstallCommand(root: string, path: string | undefined = pro
   };
   const here = real(root);
   const onPath = (path ?? '').split(delimiter).some((dir) => dir !== '' && real(dir) === here);
-  return { path: at, pathLine: onPath ? null : `export PATH=${shellWord(root)}:"$PATH"` };
+  return { path: join(root, INSTALL_COMMAND), pathLine: onPath ? null : `export PATH=${shellWord(root)}:"$PATH"` };
+}
+
+export function writeInstallCommand(root: string, path: string | undefined = process.env.PATH):
+  { path: string; pathLine: string | null } {
+  const command = installCommandOf(root, path);
+  writeTextAtomic(command.path, installCommandText(), 0o755);
+  return command;
 }

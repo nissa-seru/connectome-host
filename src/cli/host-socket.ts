@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { ContractError, installPaths } from '../update/contract.js';
 import { readInstallRecord } from '../update/launcher.js';
 
-const READY_WAIT_MS = 5_000;
+export const READY_WAIT_MS = 5_000;
 
 export interface HostReady {
   pid: number;

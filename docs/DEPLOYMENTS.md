@@ -2,8 +2,9 @@
 
 **Status:** Working notes. Generic operations patterns for running Connectome
 agents. For setting up the *code stack* (repos/branches/symlinks), see
-[`DEV-ENVIRONMENT.md`](./DEV-ENVIRONMENT.md); for standing up a new agent
-end-to-end, see [`AGENT-ONBOARDING.md`](./AGENT-ONBOARDING.md).
+[`DEV-ENVIRONMENT.md`](./DEV-ENVIRONMENT.md); for setting up a new resident,
+`connectome setup discord` and its guide,
+[`AGENT-ONBOARDING.md`](./AGENT-ONBOARDING.md).
 
 ---
 
@@ -88,7 +89,11 @@ module. Keep it on **loopback** and reach it via SSH tunnel. See
 
 Labels/units follow `cc.<agent>.agent` (launchd) / `<agent>-agent.service`
 (systemd). (launchd: a plain `kill`/`stop` respawns via KeepAlive — use `bootout`
-to stop, `kickstart -k` to restart.)
+to stop, `kickstart -k` to restart.) A service `connectome service install`
+writes is named after the install's working directory instead:
+`com.animalabs.connectome.<name>` / `connectome-<name>.service`.
+`connectome service stop` and `connectome service start` stop and start it,
+and `connectome` alone shows how to follow its log.
 
 A restart can make auxiliary model calls before any user message: agent-framework
 immediately drains restored Context Manager compression/merge debt. This happens only
@@ -98,6 +103,8 @@ resident first, then drain the debt offline with `bun scripts/warmup-session.ts
 <session> --agent <recipe agent.name> --data-dir <DATA_DIR> --model <compressionModel>`.
 Recipes that change `--l1-budget`, `--l2-budget`, `--l3-budget`, or
 `--merge-threshold` must pass the same values to the warmup command.
+
+**Moving a resident off heartbeat-mcpl.** The heartbeat is agent-framework's now, `modules.heartbeat`, and a recipe that turns it on can't also name `mcpServers.heartbeat`: the host refuses it at load, since both would wake the agent and their tools share the names `heartbeat--…`. To move a resident over, replace its `mcpServers.heartbeat` with `"heartbeat": { "importFrom": { "configPath": "<its HEARTBEAT_CONFIG_FILE>", "remindersPath": "<its HEARTBEAT_REMINDERS_FILE>" } }` under `modules`, which brings the server's schedule and reminders along on the first start that finds no heartbeat state of the framework's own; once the framework has kept its own state, it reads that and imports nothing. Its wake rules for `source: "heartbeat"` keep applying, since the framework's ticks and reminders reach the gate as the server's pushes did ([ATTENTION-AND-GATING.md](./ATTENTION-AND-GATING.md)).
 
 **Logs / observability** (`data/` below is `DATA_DIR`, default `./data` under
 the working directory):
@@ -154,14 +161,122 @@ the working directory):
   `invalid_request` rejections of the history itself, a poison-history breaker
   sheds the newest complete exchange and retries, capped by
   `refusalHandling.maxRewinds` (default 3) per episode.
-- **`scripts/connectome-doctor [INSTALL_DIR] [UNIT]`** — one-shot "why isn't
-  the agent responding?" (python3; systemd-user boxes). Prints service state,
-  disk, journal staleness (and where the unit really logs), a last-seen ladder
-  per pipeline stage (discord event → chronicle ingest → `llm-calls` →
-  delivery), recent failures from the unit's log file and
-  `INSTALL_DIR/logs/failures.log`, and a live gate dump via `SIGUSR2`. It
-  assumes `INSTALL_DIR/data` and `INSTALL_DIR/logs`, i.e. the unit runs with
-  the install dir as its working directory.
+- **`scripts/connectome-doctor [--no-signal] [--data-dir DIR] [INSTALL_DIR]
+  [UNIT]`** — one-shot "why isn't the agent responding?" (python3;
+  systemd-user boxes). Prints service state, disk, journal staleness (and
+  where the unit really logs), a last-seen ladder per pipeline stage (discord
+  event → chronicle ingest → `llm-calls` → delivery), recent failures, and a
+  live gate dump via `SIGUSR2`. Chronicle ingest is read from the active
+  session's `records.log`, as `sessions.json` names it (an index naming none,
+  or an active session with no `records.log`, is said, and no other session's
+  records stand in); an index or `records.log` that can't be read makes the
+  stage not known, with the reason. With no `sessions.json`, which the host
+  writes at any start that finds none, the stage is never if there are no
+  sessions, and not known if there are or the sessions directory can't be
+  listed. The forward stage shows the reason of the last Discord drop
+  logged within the hour, in the debug log's last 2 MB. The host's lines are read from the file the
+  unit sends its stderr to (systemd's `StandardError`, or `StandardOutput` when
+  stderr inherits it, as the unit and its drop-ins last set it, with `%h`,
+  `%t`, `%u`, `%U` and `%%` expanded from the ladder's own home, runtime
+  directory and user), else from `INSTALL_DIR/logs/agent.log` when that was
+  written since the unit started or the unit has no start time, else from the
+  unit's journal (its last 2,000 lines); recent failures come from there and
+  from `INSTALL_DIR/logs/failures.log`, the last five of each shown under where
+  it came from, and when the journal, that file or `failures.log` can't be
+  read, it says so. `SIGUSR2` goes only to a host whose `/proc/PID/status` says
+  it catches the signal: a host that hasn't built its framework yet has no
+  listener, and the signal's default action ends it.
+  `--no-signal` leaves the dump out. It takes `INSTALL_DIR` to be the unit's
+  working directory, where `logs/` is, and `--data-dir` names the host's data
+  directory, `INSTALL_DIR/data` when left out. `CONNECTOME_DOCTOR_WITHHOLD`, a
+  JSON list of `[name, value]` pairs, has each value replaced by `<name>` in
+  what the ladder reads from the journal, the log files and the data
+  directory, and in a failed command's error. `connectome doctor` runs it for
+  an install whose service `connectome service install` set up under systemd,
+  with the data directory the install records and the values of the secrets
+  setup stored, the provider credentials and `DISCORD_TOKEN`, withheld.
+
+---
+
+## A resident's memory: sizing, folding and repair
+
+A new resident runs on the host's defaults, and [AGENT-ONBOARDING.md](./AGENT-ONBOARDING.md)'s "The recipe" leaves them alone. This section is for tuning a long-lived resident, moving one onto another solver, and repairing a store. Every option of the autobiographical strategy is described on `AutobiographicalConfig` in context-manager's `src/types/strategy.ts`, which its package carries.
+
+### The context budget and the model's window
+
+The autobiographical strategy fills the context up to `contextBudgetTokens` less `maxTokens`, which it keeps for the reply, and the system prompt and the tools' definitions come on top. If that prompt is over the model's context window, every reply fails ("prompt is too long") once the conversation fills the budget, while compression calls, whose contexts are small, still succeed: the resident seems to think but not speak.
+- **The hard limit:** `(contextBudgetTokens − maxTokens) × (1 + overBudgetGraceRatio) + system prompt + tools < model window`. A compile aims at `contextBudgetTokens − maxTokens`, but refuses only past that grace (`overBudgetGraceRatio`, 0.02 unless set), so any layout can come out up to that much over.
+- **The working rule** leaves the reply its room too: `contextBudgetTokens + system prompt + tools ≤ model window`. A long turn's tool results add to the prompt between compiles, so a budget over the working rule leaves a turn less room before the API refuses its prompt. `maxStreamTokens` counts uncached input only, so with prompt caching on it doesn't bound a turn.
+- **What the host checks:** on Anthropic's API, for a model it knows a window for, a recipe that sets no budget gets the smaller of 300k and the window less the system prompt and 32k for the tools, and loading refuses a budget whose prompt, without the tools, would pass the window, a budget that leaves too little room for the head and the verbatim tail once `maxTokens` is kept for the reply, or a `maxTokens` over the model's maximum output, naming the numbers. On any other provider, or for a model it knows no window for, the host says once at start that the fit wasn't checked (a line starting `[fit] Not checked`), and so does `connectome doctor`: the rules are yours to keep.
+- **The defaults,** for what a recipe leaves out: `maxTokens` 16,384; the budget as above, else 300k; `headWindowTokens` 4,000; `recentWindowTokens` 40% of the budget, or 40% of the budget less `maxTokens` where the head and 40% of the budget wouldn't fit beside `maxTokens` within the grace; and `maxStreamTokens` the budget plus 20k when the budget is left out too, else 150k. That tail is worked out once, from the recipe's budget: if you lower the budget at runtime on a recipe without a tail of its own, lower `tailTokens` with it, or compiles fail once the history fills the tail.
+- **Watching it:** `/debug/context/makeup` ([debug-context-api.md](./debug-context-api.md)) counts the next request as its preview builds it, without what modules add at each turn, and that total with `maxTokens` must stay under the window, with room for what modules add. It gives no total when the count can't be had ("Compression and token counts", below). Trim the budget or `recentWindowTokens` before it gets there.
+
+### The folding solver
+
+The solver decides, at each compile, which summaries to present and which messages to keep raw, so the context fits the budget.
+- **`kv-unified`** is the host's default for an autobiographical or frontdesk recipe that names no solver and leaves adaptive resolution on, as it is unless the recipe sets `adaptiveResolution: false`. It scores candidate layouts on budget fit, cache cost (what a change of layout costs in cache writes against reads, at the model's prices), continuity and fidelity, and picks the cheapest acceptable one. context-manager has no defaults for it, so the host passes a complete block: a recipe without a `kvUnified` block gets the host's standard one, `standardKvUnifiedConfig` in `src/framework-strategy.ts`. Its `cacheReadPrice` and `cacheWritePrice` are ratios to the model's uncached input price, for the model, its provider and the recipe's `cacheTtl`, as the host's pricing table (`src/call-pricing.ts`) has them: they match what the provider bills, except where an entry there says otherwise, as Sonnet 5.5's reads do (0.1 where the pricing page gives 0.05). Write the block yourself only to change the policy, and then set the prices to match: that function shows what it picks.
+- **`kv-stable`** keeps the presented layout as stable as it can between compiles, so the cached prefix survives, and folds deeper only when forced. It's what residents built before kv-unified still run, and such a resident pins `"foldingStrategy": "kv-stable"`: a recipe that names no solver gets the host's default, above, on its next start under this host.
+- **The block's checks:** the host refuses at load a `kvUnified` block whose `treeifyNonContiguousSummaries` or `preserveGapBearingSummaries` isn't an explicit boolean, or that sets both `true`, and checks the optional keys when set: `hysteresisCertificate` a boolean (on unless `false`), `policy.ageBandSteps` an integer from 0 to 64 (4 unless set), `latentDemandMode` `"individual"` or `"joint"` (`"joint"` unless set), and `engine` `"auto"`, `"subtree"` or `"dag"`. It passes the block on whole. A key under `kvUnified` or its `policy` that the host doesn't read is named in a startup warning, with the key it was probably meant to be.
+
+**Before moving a resident onto kv-unified:**
+- Moving an established resident's solver changes its layout, so expect a full write of its prompt cache.
+- kv-unified's solve assumes each summary covers a contiguous run of messages. A store whose summaries cross doesn't open under the default topology policy, whatever the solver: audit and repair it first ("Crossed summaries: auditing and repairing a store", below). Setting `preserveGapBearingSummaries` or `treeifyNonContiguousSummaries` makes such a store open and report instead, with `compressionDebt` critical, but the solver then works around holes, where its search can pass `labelCeiling`: that solve takes the cut with the fewest tokens instead, and the host warns once, `[kv-unified] labelCeiling <N> exceeded at <M> labels`, which says a high enough `labelCeiling` lets the search fit. `treeifyNonContiguousSummaries` solves fast, but drops the deepest summaries, and the floor can land above the budget.
+- Rehearse with the cache live, not only cold. The host supplies a `kvUnifiedImmutablePrefixHash` at each compile, and a dry compile of a copy from a script of your own passes none, so it never takes the solver's cache-live path: rehearse on a copy with the hash the live host would pass.
+
+### Compression and token counts
+
+**The compression model** writes the summaries, by default with the agent's own model (`agent.strategy.compressionModel` unset) and in the agent's voice (`summaryParticipant`, the agent's name unless set), each introduced as standing in for earlier conversation whose exact text isn't shown (`summaryContextLabel`). If that model is flaky or being retired, folding stalls, summaries pile up, and the context can't be folded under the budget. A stable model can compress for an agent that speaks on a more fragile one, since the two are separate settings and the summaries stay in the agent's name. Moving compression off the agent's own model is mildly identity-adjacent, so tell the resident's person.
+
+**Exact counts** in the makeup view, and in `connectome doctor`'s token counts, ask Anthropic's `count_tokens`, at `ANTHROPIC_BASE_URL` when it's set, for the agent's own model, with a provider prefix taken off (`anthropic/claude-opus-4` counts as `claude-opus-4`). `COUNT_TOKENS_MODEL` in `.env` names a model to count with in place of the agent's. That's needed when the endpoint can't count the agent's model and answers with an error status, as Anthropic's does for a retired model and a gateway's may for one only it serves, or when the model's name, without its prefix, isn't a Claude model's, which isn't asked at all: the makeup view then shows no exact total (`countSource` `count_tokens_failed_<status>`, or `count_tokens_unsupported_model`). Doctor says to set it when the count answers 404, and for a name that isn't a Claude model's, that `count_tokens` isn't asked.
+
+### When a compile can't fit
+
+With either solver, when summary production lags behind or the conversation is very large, a compile can reach a floor above the budget: context-manager refuses it with `OverBudgetError`, and kv-unified reports `budgetMet: false` with the floor it reached. Let production catch up, lower `recentWindowTokens`, or, on kv-unified, check that the summaries are contiguous ("Crossed summaries: auditing and repairing a store", below) before touching `treeifyNonContiguousSummaries`.
+
+### Crossed summaries: auditing and repairing a store
+
+Since context-manager 0.12.0, every load audits the summaries for crossed ownership: a summary whose messages aren't one contiguous run in store order, as merges across eras, restores and branches interleaving, or hand surgery can leave. Under the default topology policy, `reject`, the open throws `StoreTopologyError` and the resident doesn't start; the store keeps its history. Under `report`, it logs the crossings and opens, and `/healthz` shows them as `compressionDebt.<agent>.topologyViolations`, with `state: critical`. A `kvUnified` block with `preserveGapBearingSummaries` or `treeifyNonContiguousSummaries` set to `true` defaults to `report`. This host doesn't pass a `strategy.topologyPolicy` key on, and doesn't warn about it, so the error's "set topologyPolicy: 'report'" can't be followed from a recipe: repair a copy of the store instead, as below. Separately, a merge that would make a crossed summary is refused into the merge quarantine (`compressionDebt.<agent>.topologyRefusals`).
+
+**Before any update** that brings a context-manager of 0.12.0 or later, run the host's store audit after the copy, as "Updating an install" and "Updating checkouts" do. It opens each store as a start would, under each resident's own policy.
+
+**Auditing one store.** context-manager's scripts are in its `dist/scripts/`, under the `node_modules` the host runs from; each script's own header describes it whole. Run them on a copy of the stopped store: a full or reflinked copy, never hard links, since opening a store writes to it.
+
+```bash
+node <context-manager>/dist/scripts/audit-topology.js <store-copy> --namespace agents/<agent> --json > audit.json
+```
+
+It exits 2 when it finds crossings, 1 when it couldn't open the store, and 0 when it found none. A warning that it saw nothing to audit means a wrong `--namespace`, a copy without the strategy's state, a store with no summaries yet, or chunks none of which a summary owns. It opens the store audit-only, which skips chunking the messages not yet in a chunk, a step a start takes before its check, so it can pass a store a start refuses: the host's store audit is the one that opens a store as a start does. Its listing of summaries no merge can take reads the resident's merge settings, which the store doesn't hold, so give it them as the resident has them (`--merge-threshold`, `--merge-max-span`, `--merge-hold`, `--no-speculative-production`); the same holds for the repair.
+
+**Repairing.** Repair a fresh copy of the stopped store, made the same way, never the store itself.
+
+```bash
+node <context-manager>/dist/scripts/repair-topology.js <store-copy> --namespace agents/<agent> [--mode lossless|compact|rebuild] [--rebuild-since <messageId|ISO date>] [--apply]
+```
+
+- It's a dry run, which prints its plan, unless `--apply`. After `--apply` it reopens the copy under `reject` to check it. It exits 0 when nothing crossed is left (or the dry run's plan leaves nothing crossed), 2 when the plan is incomplete or the check failed, and 1 on a usage or open error.
+- `lossless`, the default, only detaches, so no summary claims what it didn't see, but the pyramid unravels around each fragment. `compact` keeps depth at the price of gaps in the summaries' prose. `rebuild` dissolves every summary whose span touches a crossed region, with its ancestors, back to level-1 summaries, for the merge ladder to fold again with real summarizer calls. With `rebuild`, `--rebuild-since` rebuilds only the crossings from that message on, and compacts older ones.
+- After a `rebuild`, fold the same copy again with the offline drain, which writes summaries with real model calls, taking the key from `ANTHROPIC_API_KEY` in its environment. The repair prints its command:
+
+```bash
+node <context-manager>/dist/scripts/drain-autobiographical.js <store-copy> agents/<agent> --apply --model=<model> --participant=<agent> --recipe=<the resident's recipe.json> --tools-log=<llm-calls.jsonl>
+```
+
+- The drain takes the resident's tool definitions from the last streamed call in `--tools-log` whose raw request the log kept with tool definitions in it, and a call log keeps an ordinary call's raw request only on a host started with `LLM_CALLS_FULL_PAYLOADS=1`. So, if the resident still runs on a release that opens its store, restart it with that set and stop it just after one of its turns, before you copy the store; the turn is a real one, and the store keeps it. Pass the log that restart began: each start of the host begins a new `llm-calls.<iso>.jsonl` in the data directory. Without the definitions, the drain can't compress a chunk with tool calls, nor any chunk when the model is a Fable or Mythos model: choose `lossless` or `compact` then, which need no drain. A drain that stops short exits 1, says why (`not drained (max-steps)`, at `--max-steps`, 200 unless given), and goes on from where it stopped when run again with the same flags on the same copy, leaving out any `--clear-merge-quarantine`. A drain that finishes with quarantines left also exits 1 and says how many. A merge's quarantine clears with `--clear-merge-quarantine=<key>` on the next run, and `audit-topology` names the key of one that stands beside a stranded summary. A compression quarantine has no command in this host, as `audit-topology` says, so a drain that ends with one can't exit 0. Run it until it exits 0.
+- Then audit the copy again, with the same `--namespace`. The copy takes the store's place only when the repair with `--apply`, the drain's last run after a `rebuild`, and the audit each exited 0. Read the repair's and the drain's output, put the copy in the store's place, keep the original beside it untouched, and run the host's store audit before you start the resident, since the scripts open the copy audit-only. Start it only when the host's audit exits 0; if it doesn't, put the original back. If the repair or the audit doesn't exit 0, or a drain can't be brought to exit 0 that way, discard the copy: the store is as it was when you copied it.
+
+Two traps: any open of a store with a normal strategy configuration chunks its newest messages under that configuration, so check a store only on a copy, with the host's audit or the audit-only scripts, never by opening a live store from a script of your own; and a copy of a running store reads whatever state was last written to disk, so copy a stopped store.
+
+### Refusals and signed thinking
+
+**Refusals.** Anthropic's safety classifier can end a request with `stop_reason: refusal` and the category `reasoning_extraction`. It halts residents built from dense reasoning transcripts, and residents that keep diaries in long tool arguments, more than others. The recipe-level mitigations are `agent.refusalHandling.retries`, which agent-framework's `AgentConfig.refusalHandling` documents (its types, `dist/src/types/agent.d.ts`), `agent.strategy.compressionToolProseFallback` into a `journal` tool for long `think` or `skip_reply` arguments, and `agent.strategy.carrierPolicy: "live-strip"` when the live window refuses but compression doesn't. [claude-code-ingest.md](./claude-code-ingest.md)'s "If you hit `reasoning_extraction` refusals" has the symptoms, a triage table and how to find the trigger; it applies to any resident. Never quote a suspected trigger into a channel the resident reads.
+
+**Signed thinking is bound to its model.** A transcript's signed thinking blocks replay only on the model that made them; any other model refuses the request. The API also refuses a request that changes the shape of a turn around a thinking block it keeps (split, reordered, or with something inserted before it): "thinking blocks cannot be modified".
+
+**On Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5, and, by the host's table, the Mythos models, a block is bound to its request too:** to the conversation and head (system text, tools, model) it was minted under. Once those differ, as after a fold, an account that enforces the binding refuses a request that carries it. context-manager leaves out the thinking a fold invalidates (anima-research/context-manager#155). Through the Anthropic API, the host also sends the first four the drop control on agent turns, so the provider drops such a block rather than refusing the request, and passes each one's window. So there agent-framework doesn't break a turn's stream at `maxStreamTokens` (or the `/budget` command's value): the stream breaks mid-turn for its size only where its next request would pass the window, and a fresh compile carries the turn on.
+
+### Health
+
+`/healthz` holds, by agent: `compressionQuarantine`; `compressionDebt`, `topologyViolations` and `topologyRefusals` among it; `contextComposition`, the head, raw middle, summaries and tail as the last live compile rendered them, with no entry for an agent that has had none since its context was loaded, or whose strategy keeps none (`contextCompositionNotKept` names those); `runtimeSettings`; `loadRepair`, the newest load repair its strategy made, absent while it has made none; and `readFailures`, present only when one of those reads threw, with what it said.
 
 ---
 
@@ -487,8 +602,8 @@ while a clone installs from its tag's `bun.lock`. So:
     store, only a start: whether to start on it is yours. A store refused
     for crossed summaries, whose line says `store topology rejected`, can
     instead be repaired on a copy of the stopped store as
-    [AGENT-ONBOARDING §11.8](./AGENT-ONBOARDING.md#11-critical-gotchas-read-before-deploying)
-    says. Then put the repaired copy in the store's place, keeping the
+    ["Crossed summaries: auditing and repairing a store"](#crossed-summaries-auditing-and-repairing-a-store),
+    above, says. Then put the repaired copy in the store's place, keeping the
     original, and run the audit again before starting, since the repair's
     own check opens the copy `auditOnly`, which can pass a store a start
     refuses. For anything else a line names, correct it and run the audit

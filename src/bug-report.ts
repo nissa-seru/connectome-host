@@ -86,12 +86,12 @@ const MODEL_FAMILY: Record<string, (first: string) => boolean> = {
 const BUILT_IN_MODULES = [
   'subagents', 'lessons', 'retrieval', 'wake', 'workspace', 'instructions', 'activity', 'notices',
   'mcplAdmin', 'history', 'identity', 'fleet', 'webui', 'ttsRelay', 'subscriptionGc', 'channelMode',
-  'selfRestart',
+  'selfRestart', 'setup', 'selfUpdate',
 ];
 const LIVE_MODULE_NAMES = new Set([
   'activity', 'api', 'channel-mode', 'discord', 'fleet', 'health', 'history', 'identity', 'instructions',
-  'lessons', 'lifecycle', 'mcpl-admin', 'notices', 'observers', 'openai-codex', 'retrieval', 'settings', 'subagent',
-  'subscription-gc', 'time', 'tts-relay', 'tui', 'webui', 'workspace',
+  'lessons', 'lifecycle', 'mcpl-admin', 'notices', 'observers', 'openai-codex', 'retrieval', 'settings', 'setup',
+  'subagent', 'subscription-gc', 'time', 'tts-relay', 'tui', 'webui', 'workspace',
 ]);
 
 const FORMATTERS = new Set(['native', 'anthropic-xml']);
@@ -141,7 +141,7 @@ export const HOST_LOG_TAGS = new Set([
   'picker-config-drift', 'picker-dead-ids', 'picker-unrealizable', 'prose', 'provider-admission',
   'provider-cooldown', 'puppet', 'push-event-rejected', 'reasoning', 'reasoning-effort', 'refusal-retry',
   'refusal-rewind', 'rfc005', 'routespeech', 'routing', 'section', 'self-restart', 'self-wake', 'settings', 'shutdown',
-  'sleep', 'spill', 'store-topology', 'subagent', 'subscription-gc', 'thinking', 'tool', 'tool-boundary',
+  'sleep', 'spill', 'store-topology', 'subagent', 'subscription-gc', 'surfaces', 'thinking', 'tool', 'tool-boundary',
   'tool-result-guard', 'tool_result', 'tools', 'tts-relay', 'unstick', 'update', 'voice', 'webui', 'webui-observers',
   'windowed-passthrough', 'workspace',
 ]);
