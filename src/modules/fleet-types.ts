@@ -56,7 +56,7 @@ export type IncomingCommand =
 
 /** Lifecycle events added by the headless runtime (not framework TraceEvents). */
 export type LifecycleEvent =
-  | { type: 'lifecycle'; phase: 'ready'; pid: number; dataDir: string; recipe?: string; idle?: boolean; turnWork?: boolean; agent?: string; ts?: number }
+  | { type: 'lifecycle'; phase: 'ready'; pid: number; dataDir: string; recipe?: string; idle?: boolean; turnWork?: boolean; agent?: string; sweep?: boolean; ts?: number }
   | { type: 'lifecycle'; phase: 'turn-work-done'; texts?: number; ts?: number }
   | { type: 'lifecycle'; phase: 'idle'; texts?: number; ts?: number }
   | { type: 'lifecycle'; phase: 'exiting'; reason: string; ts?: number };
@@ -71,14 +71,16 @@ export interface CommandOutputEvent {
 }
 
 /** The end of the answer to a `command` that carried a corrId, with the
- *  error when the command threw, and `refused` when `/update` answered
- *  that it didn't do what was asked; its lines say why. No other command
- *  sets it. */
+ *  error when the command threw, `refused` when `/update` or `/sweep`
+ *  answered that it didn't do what was asked, and `held` when `/sweep
+ *  --write` took a sweep that the store applies later; its lines say why.
+ *  No other command sets either. */
 export interface CommandDoneEvent {
   type: 'command-done';
   corrId: string;
   error?: string;
   refused?: true;
+  held?: true;
   ts?: number;
 }
 

@@ -404,6 +404,7 @@ export async function runHeadless(app: AppContext, argv: string[] = [], testing:
         let quit = false;
         let failed: string | undefined;
         let refused = false;
+        let held = false;
         try {
           const { handleCommand } = await import('./commands.js');
           // A fleet parent's fleet--command says so; any other comes from a
@@ -414,10 +415,12 @@ export async function runHeadless(app: AppContext, argv: string[] = [], testing:
           });
           for (const line of result.lines) output(line.text, line.style);
           refused = result.refused === true;
+          held = result.held === true;
           if (result.asyncWork) {
             const followUp = await result.asyncWork;
             for (const line of followUp.lines) output(line.text, line.style);
             refused = followUp.refused === true;
+            held = followUp.held === true;
           }
           if (result.switchToSessionId) {
             const switched = await app.switchSession(result.switchToSessionId);
@@ -429,7 +432,10 @@ export async function runHeadless(app: AppContext, argv: string[] = [], testing:
           throw error;
         } finally {
           if (corrId !== undefined) {
-            reply({ type: 'command-done', corrId, ...(failed === undefined ? {} : { error: failed }), ...(refused ? { refused: true } : {}) });
+            reply({
+              type: 'command-done', corrId, ...(failed === undefined ? {} : { error: failed }), ...(refused ? { refused: true } : {}),
+              ...(held ? { held: true } : {}),
+            });
           }
         }
         if (quit) {
@@ -726,6 +732,7 @@ export async function runHeadless(app: AppContext, argv: string[] = [], testing:
       idle: hadAtLeastOneInference && idleEmitted,
       turnWork,
       agent: primaryAgentName,
+      sweep: true,
     });
 
     // The first client then hears the boot it missed, oldest first and each

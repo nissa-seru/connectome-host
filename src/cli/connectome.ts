@@ -19,6 +19,7 @@ import { serviceCommand, serviceCommands, serviceLines, unitElsewhere } from './
 import { serviceUnits } from './service-unit.js';
 import { ROOT_IN_WORKDIR, SETUP_RECIPE, SETUP_SUMMARY, SETUP_USAGE, firstLine, setup, setupDirectory } from './setup.js';
 import { shellCommand } from './shell.js';
+import { SWEEP_WORDS, sweepAsk } from '../sweep-words.js';
 
 export interface CliContext {
   root: string | null;
@@ -39,6 +40,8 @@ const HEALTH_WAIT_MS = 10_000;
 
 const UPDATE_USAGE = 'connectome update [check | install | restart [wait | now | resume | <version>] | ' +
   'back [(keep | restore) [<version>]]]';
+
+const SWEEP_USAGE = `connectome sweep ${SWEEP_WORDS}`;
 
 export const COMMANDS: CliCommand[] = [
   {
@@ -84,6 +87,21 @@ export const COMMANDS: CliCommand[] = [
     ],
     run: update,
   },
+  {
+    name: 'sweep',
+    usage: SWEEP_USAGE,
+    summary: 'Asks the running host about its sweeps: named repairs of bodies that its store already holds. With no ' +
+      'name, it lists each sweep, where it stands on the open branch, the bodies it would change now and those the store ' +
+      'would refuse. With a name, the host shows each body that the sweep would change, with its new text and never its ' +
+      'old text, and writes nothing; for a sweep taken already, it also gives each pass and the bodies it listed. With ' +
+      '--write, the host takes the sweep for the whole store and applies it. --summaries <agent> gives what the second ' +
+      'act would drop of that agent\'s old summaries, and with --write makes it. Words it doesn\'t take are a usage ' +
+      'error, which exits 2 before any host is looked for. When no host answers, it lists nothing and exits 1. It exits 1 ' +
+      'when the running host is an older release without /sweep, when the host refuses, and when a write left a body as ' +
+      'it was, which the host names. It exits 3 when the write took the sweep while a turn was alive, so that the host ' +
+      'applies it later.',
+    run: sweep,
+  },
   serviceCommand,
   {
     name: 'doctor',
@@ -125,9 +143,9 @@ function isHelp(word: string | undefined): boolean {
 
 function usage(print: (line: string) => void): void {
   print('connectome: an install\'s own command. Each runs the release its install runs. Its own refusals go to ' +
-    'stderr, and what the host answers to update to stdout, a refusal or a failure it answers included; an error ' +
-    'that stops the host\'s update command goes to stderr. send prints only what the agent says on stdout, and its ' +
-    'own notes on stderr.');
+    'stderr, and what the host answers to update and sweep to stdout, a refusal or a failure it answers included; an ' +
+    'error that stops the host\'s update or sweep command goes to stderr. send prints only what the agent says on ' +
+    'stdout, and its own notes on stderr.');
   print('  connectome');
   print('      Which install this is, its release, whether its host is running, and its update state.');
   for (const command of COMMANDS) {
@@ -463,9 +481,42 @@ function backWithNoHost(ctx: CliContext, [, choice, release]: string[], host: No
     { ...launcher, report: (text) => ctx.err(text) }, release, cliWays(typed).back);
 }
 
-function noHost(ctx: CliContext, host: NoHost): number {
-  ctx.err(`connectome: no host answers (${host.reason}).${host.down ? ` ${startHost(ctx.root!, 'ask again')}` : ''}`);
+function noHost(ctx: CliContext, host: NoHost, readFrom?: string): number {
+  ctx.err(`connectome: no host answers (${host.reason}).${readFrom === undefined ? '' : ` ${readFrom}`}` +
+    `${host.down ? ` ${startHost(ctx.root!, 'ask again')}` : ''}`);
   return 1;
+}
+
+export async function sweep(ctx: CliContext): Promise<number> {
+  const typed = installCommandAt(ctx.root!);
+  const ask = sweepAsk(ctx.argv);
+  if (ask === null) {
+    ctx.err(`connectome: usage: ${SWEEP_USAGE.replace(/^connectome/, () => typed)}`);
+    return 2;
+  }
+  const host = await reach(ctx);
+  if (host === null) return 1;
+  if ('reason' in host) return noHost(ctx, host, 'The sweeps, and where each stands, are read from the running host\'s store.');
+  if (host.ready.sweep !== true) {
+    host.close();
+    ctx.err('connectome: nothing was asked: the running host is an older release than this command, without /sweep. ' +
+      `${thisRelease(ctx.root!)} Then ${typed} sweep works.`);
+    return 1;
+  }
+  const answer = await command(host, ['/sweep', ...ctx.argv].join(' '), (line) => ctx.out(line), typed);
+  host.close();
+  if (answer.how === 'closed') {
+    ctx.err('connectome: the host closed the connection before its answer ended, so this command can\'t tell how the ' +
+      'sweep ended. The host stopping closes it, and so does another connectome command connecting.' +
+      (ask.kind === 'list' ? '' : ` \`${typed} sweep ${ask.name}\` says where it stands.`));
+    return 1;
+  }
+  if (answer.error !== undefined) {
+    ctx.err(`connectome: the host's sweep command failed: ${answer.error}`);
+    return 1;
+  }
+  if (answer.refused) return 1;
+  return answer.held ? 3 : 0;
 }
 
 function startHost(root: string, then: string): string {
@@ -494,7 +545,7 @@ async function reach(ctx: CliContext): Promise<HostClient | NoHost | null> {
   }
 }
 
-type Answer = { how: 'done'; error?: string; refused?: true } | { how: 'closed' };
+type Answer = { how: 'done'; error?: string; refused?: true; held?: true } | { how: 'closed' };
 
 async function command(host: HostClient, text: string, print: (line: string) => void, typed?: string): Promise<Answer> {
   host.subscribe([]);
@@ -508,6 +559,7 @@ async function command(host: HostClient, text: string, print: (line: string) => 
           how: 'done',
           ...(typeof event.error === 'string' ? { error: event.error } : {}),
           ...(event.refused === true ? { refused: true } : {}),
+          ...(event.held === true ? { held: true } : {}),
         });
       }
     });

@@ -23,6 +23,7 @@
  *   /usage         — Show session token usage and costs
  *   /bug <text>    — Assemble a bug report to file on GitHub (nothing is sent)
  *   /update        — Update, Restart and Go back
+ *   /sweep         — The sweeps, named repairs of bodies the store already holds
  *   /help          — List commands
  */
 
@@ -49,6 +50,7 @@ import {
   COMMAND_WAYS, PAGE_WAYS, cliWays, goBackLines, goBackUnread, statusLines, type UpdateWays,
 } from './web/update-text.js';
 import { agentActivity, type AgentBudgetHold, type AgentRetrying } from './web/agent-activity.js';
+import { handleSweep } from './sweep-command.js';
 
 interface AppContext {
   framework: AgentFramework;
@@ -102,6 +104,9 @@ export interface CommandResult {
   branchChanged?: boolean;
   asyncWork?: Promise<CommandResult>;
   refused?: boolean;
+  /** A `/sweep --write` that took the sweep and that the store applies
+   *  later: neither done nor refused. */
+  held?: boolean;
   switchToFleetPeek?: string;
   switchToFleetView?: boolean;
   /** The branch the answer says the `_config` mount wasn't written from:
@@ -388,6 +393,8 @@ function dispatchCommand(command: string, cmd: string, change: string | null, ap
           { text: '                         (subcommands: list | status [name] | view | peek <name> | stop <name> | restart <name>)', style: 'system' },
           { text: '  /update                Whether a newer release is out, and this install\'s update state', style: 'system' },
           { text: '                         (subcommands: check | install | restart [wait | now | resume | <version>] | back [(keep | restore) [<version>]])', style: 'system' },
+          { text: '  /sweep                 The sweeps, and where each stands; with a name, what it would change', style: 'system' },
+          { text: '                         (words: [<name> [--write] | <name> --summaries <agent> [--write]])', style: 'system' },
         ],
       };
 
@@ -473,6 +480,27 @@ function dispatchCommand(command: string, cmd: string, change: string | null, ap
 
     case 'update':
       return handleUpdate(args, input.page ? PAGE_WAYS : input.typed === undefined ? COMMAND_WAYS : cliWays(input.typed));
+
+    case 'sweep': {
+      // A write changes the session's store: it is refused while a session switch is under way, and a switch waits
+      // for it. Its refusal is marked, as each of /sweep's refusals is.
+      const writes = args.includes('--write');
+      const switching = writes ? refusedWhileSwitching(app, '/sweep --write') ?? refusedWhileSwitchQuiesced(app, '/sweep --write') : null;
+      if (switching) return { lines: [{ text: switching, style: 'system' }], refused: true };
+      const result = handleSweep(args, {
+        framework,
+        requester,
+        command: input.typed === undefined ? '/sweep' : `${input.typed} sweep`,
+        outside: () => {
+          const open = app.sessionManager.getActiveSession()?.id;
+          return {
+            otherSessions: app.sessionManager.listSessions().filter((session) => session.id !== open).length,
+            fleetChildren: [...(getFleet(app)?.getChildren().keys() ?? [])],
+          };
+        },
+      });
+      return writes && result.asyncWork ? { ...result, asyncWork: trackOperatorWork(app, '/sweep --write', result.asyncWork) } : result;
+    }
 
     default:
       return {

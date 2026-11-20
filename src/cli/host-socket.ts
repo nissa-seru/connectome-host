@@ -13,6 +13,8 @@ export interface HostReady {
   recipe: string;
   turnWork?: boolean;
   agent?: string;
+  /** Whether the host has `/sweep`: true from the first release with it. */
+  sweep?: boolean;
 }
 
 export type HostEvent = Record<string, unknown> & { type: string };
@@ -123,6 +125,7 @@ export async function openSocket(socketPath: string, waitMs?: number): Promise<H
             recipe: String(event.recipe ?? ''),
             ...(typeof event.turnWork === 'boolean' ? { turnWork: event.turnWork } : {}),
             ...(typeof event.agent === 'string' ? { agent: event.agent } : {}),
+            ...(event.sweep === true ? { sweep: true } : {}),
           };
           clearTimeout(timer);
           settle(client);
