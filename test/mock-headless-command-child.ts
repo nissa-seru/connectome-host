@@ -49,6 +49,12 @@ await runHeadless({
       appendFileSync(join(process.env.DATA_DIR!, 'nudged'), `${by}\n`);
       return { ok: true, agentName: 'fixture', agentStatus: 'idle' };
     },
+    // /sweep's verbs, for a take that the store applies later (test/headless-command-done.test.ts).
+    listSweeps: () => [{ name: 'held-test', line: 'is applied later' }],
+    takeSweep: async (name: string) => ({
+      outcome: 'held', name, took: { take: 'take-1', name, at: '2026-11-20T00:00:00.000Z' },
+      refusal: 'Cannot sweep while fixture is inferring',
+    }),
     puppetToolCall: async (_agent: string, _tool: string, input: Record<string, string>) => {
       while (!existsSync(input.release!)) await Bun.sleep(10);
       // The command's promise continuations (including reply writes) drain

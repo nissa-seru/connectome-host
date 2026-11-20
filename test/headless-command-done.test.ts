@@ -158,6 +158,18 @@ test('/update with the reader\'s typed command names each way as they type it, a
   }
 });
 
+test('the ready event says the host has /sweep, and a /sweep whose take the store applies later ends with command-done marked held, not refused', async () => {
+  await withChild(async (send, events) => {
+    const ready = events.find((event) => event.type === 'lifecycle' && event.phase === 'ready');
+    expect(ready?.sweep).toBe(true);
+    send({ type: 'command', corrId: 'h1', command: '/sweep held-test --write' });
+    await until(() => events.some((event) => event.type === 'command-done' && event.corrId === 'h1'), 'done');
+    const { ts: _ts, ...done } = events.find((event) => event.type === 'command-done' && event.corrId === 'h1')!;
+    expect(done).toEqual({ type: 'command-done', corrId: 'h1', held: true });
+    expect(events.some((event) => event.corrId === 'h1' && String(event.text).includes('Cannot sweep while fixture is inferring'))).toBe(true);
+  });
+});
+
 test('a command with a corrId that isn\'t a string command is refused with command-done', async () => {
   await withChild(async (send, events) => {
     send({ type: 'command', corrId: 'n1', command: 42 });

@@ -378,9 +378,10 @@ test('help lists the commands, and a word that isn\'t one is a usage error', asy
     'is back when nothing listens on the host\'s socket: then back says whether a Go back is offered, and back keep ' +
     'or back restore asks the next start to go back.');
   expect(help.out).toContain('\n  connectome help\n');
-  expect(help.out).toContain('Its own refusals go to stderr, and what the host answers to update to stdout, a refusal ' +
-    'or a failure it answers included; an error that stops the host\'s update command goes to stderr. send prints only ' +
-    'what the agent says on stdout, and its own notes on stderr.');
+  expect(help.out).toContain('Its own refusals go to stderr, and what the host answers to update and sweep to stdout, a ' +
+    'refusal or a failure it answers included; an error that stops the host\'s update or sweep command goes to stderr. ' +
+    'send prints only what the agent says on stdout, and its own notes on stderr.');
+  expect(help.out).toContain('\n  connectome sweep [<name> [--write] | <name> --summaries <agent> [--write]]\n');
   for (const word of ['check, or no word', 'install', 'restart', 'restart wait', 'restart now', 'restart resume', 'back',
     'back keep', 'back restore']) {
     expect(help.out).toMatch(new RegExp(`\\n +${word}: `));
@@ -1434,4 +1435,86 @@ test('bare whose host doesn\'t answer the health request gives up and says so', 
   expect(status).toBe(0);
   expect(out.join('\n')).toContain('Its host is running: pid 4242');
   expect(out.join('\n')).toContain('Its update state couldn\'t be read: no answer came within 0.3 s');
+});
+
+// connectome sweep, the sweep's door: the entries and where each stands come from the running host, so with no host
+// it lists nothing.
+const SWEEP_READY = (data: string) => ({ pid: 4242, dataDir: data, recipe: 'Resident', turnWork: false, agent: 'resident', sweep: true });
+
+test('sweep with no host answering lists nothing, and says so in update\'s words, with where the sweeps are read from', async () => {
+  const { root } = install();
+  const { path } = writeInstallCommand(root, '');
+  for (const words of [[], ['rewords-test'], ['rewords-test', '--write'], ['rewords-test', '--summaries', 'resident']]) {
+    const ran = await run(path, ['sweep', ...words], root);
+    expect(ran.status).toBe(1);
+    expect(ran.out).toBe('');
+    expect(ran.err).toContain('connectome: no host answers (');
+    expect(ran.err).toContain('The sweeps, and where each stands, are read from the running host\'s store.');
+    expect(ran.err).toContain(`If no host is running, have its service start it with \`${process.execPath} ${join(root, 'start.js')}\`, followed by the arguments it gives the host now, then ask again.`);
+  }
+});
+
+test('sweep asks an older host, whose ready says nothing of /sweep, nothing, and says why', async () => {
+  const { root, data } = install();
+  const { path } = writeInstallCommand(root, '');
+  const asked: string[] = [];
+  await fakeHost(data, (message) => { asked.push(String(message.type)); });
+  const ran = await run(path, ['sweep'], root);
+  expect(ran.status).toBe(1);
+  expect(ran.out).toBe('');
+  expect(asked.filter((type) => type !== 'connected' && type !== 'subscribe')).toEqual([]);
+  expect(ran.err).toContain('the running host is an older release');
+  expect(ran.err).toContain(`Then ${path} sweep works.`);
+});
+
+test('sweep asks the host /sweep with its words and the install\'s command, prints the answer as given, and exits by how it ended: 0 done, 1 refused, failed or cut off, 3 held', async () => {
+  const { root, data } = install();
+  const { path } = writeInstallCommand(root, '');
+  const asked: unknown[] = [];
+  const typed: unknown[] = [];
+  let ending: Record<string, unknown> | 'close' = {};
+  await fakeHost(data, (message, reply, socket) => {
+    if (message.type !== 'command') return;
+    asked.push(message.command);
+    typed.push(message.typed);
+    reply({ type: 'command-output', text: 'Sweep rewords-test, said by the host with /sweep in it.', style: 'system', corrId: message.corrId });
+    if (ending === 'close') socket.end();
+    else reply({ type: 'command-done', corrId: message.corrId, ...ending });
+  }, SWEEP_READY(data));
+  const endings: Array<[Record<string, unknown> | 'close', number]> = [
+    [{}, 0], [{ refused: true }, 1], [{ held: true }, 3], [{ error: 'it threw' }, 1], ['close', 1],
+  ];
+  for (const [end, status] of endings) {
+    ending = end;
+    const ran = await run(path, ['sweep', 'rewords-test', '--write'], root);
+    expect({ end, status: ran.status }).toEqual({ end, status });
+    expect(ran.out).toBe('Sweep rewords-test, said by the host with /sweep in it.\n');
+    if (end === 'close') expect(ran.err).toContain('closed the connection before its answer ended');
+    else if ('error' in end) expect(ran.err).toContain('it threw');
+    else expect(ran.err).toBe('');
+  }
+  expect(asked).toEqual(endings.map(() => '/sweep rewords-test --write'));
+  expect(typed).toEqual(endings.map(() => path));
+  ending = {};
+  for (const words of [[], ['rewords-test'], ['rewords-test', '--summaries', 'resident'], ['rewords-test', '--summaries', 'resident', '--write']]) {
+    const ran = await run(path, ['sweep', ...words], root);
+    expect(ran.status).toBe(0);
+    expect(asked.at(-1)).toBe(['/sweep', ...words].join(' '));
+  }
+});
+
+test('sweep with words it doesn\'t take is a usage error before any host is looked for, a listening one included', async () => {
+  const { root, data } = install();
+  const { path } = writeInstallCommand(root, '');
+  let connections = 0;
+  await fakeHost(data, (message) => {
+    if (message.type === 'connected') connections += 1;
+  }, SWEEP_READY(data));
+  for (const words of [['rewords-test', '--bogus'], ['rewords-test', '--write', 'extra'], ['rewords-test', '--summaries'],
+    ['rewords-test', '--summaries', 'resident', '--bogus'], ['rewords-test', '--summaries', 'resident', '--write', 'extra'], ['--write']]) {
+    const wrong = await run(path, ['sweep', ...words], root);
+    expect({ words, status: wrong.status }).toEqual({ words, status: 2 });
+    expect(wrong.err).toStartWith(`connectome: usage: ${path} sweep `);
+  }
+  expect(connections).toBe(0);
 });
