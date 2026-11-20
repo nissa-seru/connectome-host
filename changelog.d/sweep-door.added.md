@@ -13,8 +13,11 @@
     `connectome sweep` exits 0 when the open branch has finished the sweep,
     and 1 when a body was not rewritten. It exits 3 when a turn was alive,
     so that the host applies the sweep later.
-  - `--summaries <agent>` gives the cost of the second act for that agent.
-    With `--write`, it drops that agent's old summaries of the sweep.
+  - A write keeps each summary that was made from a body while the body held
+    its old text, and such a summary can still hold words of that text.
+    `--summaries <agent>` gives what dropping that agent's old summaries would
+    cost. With `--write`, it drops them, and the agent then summarizes those
+    rows again from their new text.
   - When no host answers, `connectome sweep` lists nothing and exits 1.
   - The host's `ready` event carries `sweep: true`. A write that the store
     applies later ends with a `command-done` that carries `held: true`.

@@ -35,20 +35,24 @@ export function handleSweep(words: readonly string[], asked: SweepAsked): Comman
   const { framework } = asked;
   const entries = framework.listSweeps();
   if (ask.kind === 'list') return said(listLines(framework, entries));
-  const entry = entries.find((each) => each.name === ask.name);
-  if (entry === undefined) return refused([`No sweep is named ${ask.name}. ${namesOf(entries)}`]);
-  try {
+  if (ask.kind === 'show' || ask.kind === 'write') {
+    const entry = entries.find((each) => each.name === ask.name);
+    if (entry === undefined) return refused([`No sweep is named ${ask.name}. ${namesOf(entries)}`]);
     if (ask.kind === 'show') return said(showLines(framework, entry, asked));
-    if (ask.kind === 'cost') return said(costLines(framework.oldSummaryCost(ask.name, ask.agent), ask.name, ask.agent, asked.command));
-  } catch (error) {
-    return refusedFor(error);
-  }
-  if (ask.kind === 'write') {
     return {
       ...said([`Writing sweep ${ask.name}…`]),
       asyncWork: framework.takeSweep(ask.name, { requester: asked.requester })
         .then((write) => writeAnswer(write, asked.command), refusedFor),
     };
+  }
+  // The second act needs no entry: a taken sweep whose entry this host no longer has still has old summaries. The
+  // framework refuses a name that the store never took.
+  if (ask.kind === 'cost') {
+    try {
+      return said(costLines(framework.oldSummaryCost(ask.name, ask.agent), ask.name, ask.agent, asked.command));
+    } catch (error) {
+      return refusedFor(error);
+    }
   }
   return {
     ...said([`Making the second act of sweep ${ask.name} for ${ask.agent}…`]),
@@ -99,6 +103,7 @@ function showLines(framework: AgentFramework, entry: { name: string; line: strin
   if (show.changes.length > 0) lines.push(`Old summaries that a pass would leave, by agent: ${summariesOf(show.oldSummaries)}.`);
   if (receipt.take !== null) lines.push(...receiptLines(receipt));
   if (!receipt.finished || show.changes.length > 0 || show.failures.length > 0) lines.push(...beforeAWrite(show, name, asked.command));
+  else if (receipt.oldSummaries.some((each) => total(each.summaries) > 0)) lines.push(...oldSummariesSaid(name, asked.command));
   lines.push(...notReached(asked));
   return lines;
 }
@@ -131,8 +136,23 @@ function beforeAWrite(show: FrameworkSweepShow, name: string, command: string): 
     '- An ended agent\'s own rows are not in the list. When that agent runs again, a pass mends them.',
     '- No command takes a take back.',
     `- Each listed agent's prompt cache is rewritten once, from its earliest listed body: ${caches}.`,
-    `- The write does not change an old summary. After it, \`${command} ${name} --summaries AGENT\` shows what the second act ` +
-      `would drop for that agent, and \`${command} ${name} --summaries AGENT --write\` makes it.`,
+    '- The write does not change an old summary: a summary that an agent\'s memory made from a listed body while the body ' +
+      'held its old text. Such a summary can still hold words of that text.',
+    `- ${SECOND_ACT} After the write, \`${command} ${name} --summaries AGENT\` shows what it would drop for that agent, and ` +
+      `\`${command} ${name} --summaries AGENT --write\` makes it.`,
+  ];
+}
+
+const SECOND_ACT = 'The second act drops one agent\'s old summaries, and each summary made from them. That agent\'s memory then ' +
+  'summarizes those rows again from their new text. Until it has, the rows take their full room in its context, and its ' +
+  'turn can wait for that room.';
+
+/** What an old summary is, and what the second act does, where an answer counts old summaries. */
+function oldSummariesSaid(name: string, command: string): string[] {
+  return [
+    'An old summary was made from a rewritten body while the body held its old text, and it can still hold words of the ' +
+      'old text.',
+    `${SECOND_ACT} \`${command} ${name} --summaries AGENT\` shows what it would drop for that agent.`,
   ];
 }
 
@@ -176,18 +196,17 @@ function writeAnswer(write: FrameworkSweepWrite, command: string): CommandResult
     'it owes stays owed.');
   const summaries = [
     `Old summaries now, by agent: ${summariesOf(write.oldSummaries)}.`,
-    ...(write.oldSummaries.some((each) => total(each.summaries) > 0)
-      ? [`\`${command} ${name} --summaries AGENT\` shows what the second act would drop for that agent.`]
-      : []),
+    ...(write.oldSummaries.some((each) => total(each.summaries) > 0) ? oldSummariesSaid(name, command) : []),
   ];
   if (write.outcome === 'finished') {
     return said([`${took}, and the open branch has finished it.`, ...(passes.length > 0 ? passes : nothing), ...threw, ...summaries]);
   }
   return refused([
-    `${took}, and the open branch has not finished it. ${counted(write.failed.length, 'body was', 'bodies were')} not rewritten:`,
+    `${took}, and the open branch has not finished it.`,
+    ...passes,
+    `${counted(write.failed.length, 'body was', 'bodies were')} not rewritten:`,
     ...write.failed.map((failure) => `- Body ${failure.id}: ${failure.error}`),
     ...threw,
-    ...passes,
     `The sweep stays owed here: the host asks again at its next start and at a branch move, and so does \`${command} ${name} ` +
       '--write`.',
     ...summaries,
@@ -210,11 +229,12 @@ function costLines(cost: OldSummaryCost, name: string, agent: string, command: s
   const dropping = total(cost.summaries);
   if (dropping === 0) return [`${agent} has no old summary of sweep ${name}: the second act would drop nothing.`];
   return [
-    `The second act of sweep ${name} for ${agent} would drop ${counted(dropping, 'old summary', 'old summaries')}: ` +
-      `${levelsOf(cost.summaries)}.`,
-    `${agent}'s compression would then fold ${counted(cost.records, 'chunk record', 'chunk records')} again. Until it has, ` +
-      `about ${cost.rawTokens.toLocaleString('en-US')} tokens of rows render raw, and where they don't fit ${agent}'s budget, ` +
-      `${agent}'s turn waits for the room.`,
+    `The second act of sweep ${name} for ${agent} would drop ${counted(dropping, 'old summary', 'old summaries')}, made ` +
+      `while a rewritten body held its old text: ${levelsOf(cost.summaries)}.`,
+    `${agent}'s memory would then summarize those rows again from their new text, in ` +
+      `${counted(cost.records, 'chunk record', 'chunk records')}. Until it has, about ` +
+      `${cost.rawTokens.toLocaleString('en-US')} tokens of rows take their full room in ${agent}'s context, and where they ` +
+      `don't fit ${agent}'s budget, ${agent}'s turn waits for that room.`,
     `Nothing is written. \`${command} ${name} --summaries ${agent} --write\` makes it, while every agent is between turns.`,
   ];
 }
@@ -225,8 +245,10 @@ function droppedLines(dropped: OldSummaryCost, name: string, agent: string): str
   return [
     `The second act of sweep ${name} for ${agent} dropped ${counted(count, 'old summary', 'old summaries')}: ` +
       `${levelsOf(dropped.summaries)}.`,
-    `${agent}'s compression now folds ${counted(dropped.records, 'chunk record', 'chunk records')} again. Until it has, about ` +
-      `${dropped.rawTokens.toLocaleString('en-US')} tokens of rows render raw, and ${agent}'s turn can wait for the room.`,
+    `${agent}'s memory now summarizes those rows again from their new text, in ` +
+      `${counted(dropped.records, 'chunk record', 'chunk records')}. Until it has, about ` +
+      `${dropped.rawTokens.toLocaleString('en-US')} tokens of rows take their full room in ${agent}'s context, and ${agent}'s ` +
+      'turn can wait for that room.',
   ];
 }
 

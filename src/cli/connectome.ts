@@ -94,8 +94,9 @@ export const COMMANDS: CliCommand[] = [
       'name, it lists each sweep, where it stands on the open branch, the bodies it would change now and those the store ' +
       'would refuse. With a name, the host shows each body that the sweep would change, with its new text and never its ' +
       'old text, and writes nothing; for a sweep taken already, it also gives each pass and the bodies it listed. With ' +
-      '--write, the host takes the sweep for the whole store and applies it. --summaries <agent> gives what the second ' +
-      'act would drop of that agent\'s old summaries, and with --write makes it. Words it doesn\'t take are a usage ' +
+      '--write, the host takes the sweep for the whole store and applies it. A summary made from a body while it held its ' +
+      'old text keeps that text: --summaries <agent> gives what dropping that agent\'s such summaries would cost, and with ' +
+      '--write drops them, so that the agent summarizes those rows again. Words it doesn\'t take are a usage ' +
       'error, which exits 2 before any host is looked for. When no host answers, it lists nothing and exits 1. It exits 1 ' +
       'when the running host is an older release without /sweep, when the host refuses, and when a write left a body as ' +
       'it was, which the host names. It exits 3 when the write took the sweep while a turn was alive, so that the host ' +
