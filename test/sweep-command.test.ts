@@ -127,6 +127,7 @@ async function host(options: { strategy?: () => ContextStrategy; sessions?: numb
   const dir = mkdtempSync(join(tmpdir(), 'sweep-command-'));
   const storePath = join(dir, 'store');
   const { membrane, holdFor } = provider();
+  let sweeps = [rewords, quiet];
   const boot = () => AgentFramework.create({
     storePath,
     membrane: membrane as never,
@@ -136,7 +137,7 @@ async function host(options: { strategy?: () => ContextStrategy; sessions?: numb
     modules: [],
     syncIntervalMs: 0,
     maintenanceIntervalMs: 0,
-    sweeps: [rewords, quiet],
+    sweeps,
   });
   let framework = await boot();
   cleanups.push(async () => { await framework.stop(); rmSync(dir, { recursive: true, force: true }); });
@@ -154,7 +155,8 @@ async function host(options: { strategy?: () => ContextStrategy; sessions?: numb
   const sweep = (...words: string[]) => answered(handleCommand(['/sweep', ...words].join(' '), app as never, {
     requester: { via: 'test' }, typed: 'connectome',
   }));
-  const restart = async () => {
+  const restart = async (entries?: SweepEntry[]) => {
+    if (entries) sweeps = entries;
     await framework.stop();
     framework = await boot();
     app.framework = framework;
@@ -253,8 +255,10 @@ describe('/sweep NAME, the show', () => {
       'An ended agent\'s own rows are not in the list',
       'No command takes a take back.',
       'prompt cache is rewritten once',
-      'The write does not change an old summary.',
-      `connectome sweep ${NAME} --summaries AGENT`,
+      'The write does not change an old summary',
+      'can still hold words of that text',
+      'The second act drops',
+      `connectome sweep ${NAME} --summaries AGENT --write`,
       'What a sweep does not reach:',
       'conversation fork\'s seed',
       'The framework\'s log of requests already sent',
@@ -308,6 +312,10 @@ describe('/sweep NAME --write', () => {
     expect({ refused: said.refused, held: said.held }).toEqual({ refused: true, held: false });
     const line = said.text.split('\n').find((each) => each.startsWith(`- Body ${boom}: `)) ?? '';
     expect(line).toContain('Error');
+    const lines = said.text.split('\n');
+    const under: string[] = [];
+    for (let i = lines.findIndex((each) => each.endsWith('not rewritten:')) + 1; i > 0 && lines[i]?.startsWith('- '); i++) under.push(lines[i]!);
+    expect(under).toEqual([line]);
     expect(textOf(h.cm('a').getMessage(fine)!.content)).toBe(`fine ${NEW}`);
   });
 
@@ -346,7 +354,9 @@ describe('/sweep, the old summaries and the second act', () => {
       expect(total(each.summaries)).toBeGreaterThan(0);
       expect(shown.text).toContain(`${each.agent}: ${total(each.summaries)} (`);
     }
-    await h.sweep(NAME, '--write');
+    const written = await h.sweep(NAME, '--write');
+    expect(written.text).toContain('can still hold words of the old text');
+    expect((await h.sweep(NAME)).text).toContain('can still hold words of the old text');
     const cost = h.framework().oldSummaryCost(NAME, 'a');
     const before = h.sequence();
     const costSaid = await h.sweep(NAME, '--summaries', 'a');
@@ -374,6 +384,21 @@ describe('/sweep, the old summaries and the second act', () => {
     expect(dropped.text).toContain(`dropped ${total(cost.summaries)} old`);
     expect(total(h.framework().oldSummaryCost(NAME, 'a').summaries)).toBe(0);
     expect(total(h.framework().oldSummaryCost(NAME, 'b').summaries)).toBe(otherBefore);
+  });
+
+  test('a taken sweep whose entry this host no longer has still has its second act, though the list does not name it', async () => {
+    const h = await foldedPair();
+    await h.sweep(NAME, '--write');
+    await h.restart([quiet]);
+    const left = total(h.framework().oldSummaryCost(NAME, 'a').summaries);
+    expect(left).toBeGreaterThan(0);
+    const cost = await h.sweep(NAME, '--summaries', 'a');
+    expect(cost.refused).toBe(false);
+    expect(cost.text).toContain(`would drop ${left} old`);
+    expect(entryOf((await h.sweep()).text, NAME)).toBe('');
+    const dropped = await h.sweep(NAME, '--summaries', 'a', '--write');
+    expect(dropped.refused).toBe(false);
+    expect(total(h.framework().oldSummaryCost(NAME, 'a').summaries)).toBe(0);
   });
 });
 
