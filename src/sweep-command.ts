@@ -2,7 +2,7 @@ import {
   OperatorActionError, type AgentFramework, type AgentOldSummaries, type AgentSweepPass, type FrameworkSweepReceipt,
   type FrameworkSweepShow, type FrameworkSweepWrite, type OperatorRequester,
 } from '@animalabs/agent-framework';
-import type { OldSummaryCost, OldSummaryLevel, StoredContentBlock } from '@animalabs/context-manager';
+import type { SummaryDropCost, SummaryLevelCount, StoredContentBlock } from '@animalabs/context-manager';
 import type { CommandResult } from './commands.js';
 import { SWEEP_WORDS, sweepAsk } from './sweep-words.js';
 
@@ -225,7 +225,7 @@ function passLines(passes: readonly AgentSweepPass[], name: string): string[] {
   return lines;
 }
 
-function costLines(cost: OldSummaryCost, name: string, agent: string, command: string): string[] {
+function costLines(cost: SummaryDropCost, name: string, agent: string, command: string): string[] {
   const dropping = total(cost.summaries);
   if (dropping === 0) return [`${agent} has no old summary of sweep ${name}: the second act would drop nothing.`];
   return [
@@ -239,7 +239,7 @@ function costLines(cost: OldSummaryCost, name: string, agent: string, command: s
   ];
 }
 
-function droppedLines(dropped: OldSummaryCost, name: string, agent: string): string[] {
+function droppedLines(dropped: SummaryDropCost, name: string, agent: string): string[] {
   const count = total(dropped.summaries);
   if (count === 0) return [`${agent} had no old summary of sweep ${name}, so the second act dropped nothing.`];
   return [
@@ -260,11 +260,11 @@ function summariesOf(agents: readonly AgentOldSummaries[]): string {
   }).join('; ');
 }
 
-function levelsOf(levels: readonly OldSummaryLevel[]): string {
+function levelsOf(levels: readonly SummaryLevelCount[]): string {
   return levels.filter((each) => each.count > 0).map((each) => `${each.count} at level ${each.level}`).join(', ');
 }
 
-function total(levels: readonly OldSummaryLevel[]): number {
+function total(levels: readonly SummaryLevelCount[]): number {
   return levels.reduce((sum, each) => sum + each.count, 0);
 }
 
