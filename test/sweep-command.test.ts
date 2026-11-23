@@ -436,6 +436,14 @@ describe('/sweep, a write that joins a long note', () => {
     expect(shown).toContain(`- The write joins a long note: it drops ${sum} ${sum === 1 ? 'summary' : 'summaries'} of that note at once, and each summary made from them.`);
     expect(shown).toContain('- A resident\'s turn can wait until its compression has folded those rows again.');
     expect(shown).toContain('- The same happens on each other branch when the host moves to it, and nobody is shown a count there.');
+
+    const written = (await h.sweep(NAME, '--write')).text;
+    const told = written.split('\n').find((each) => each.startsWith("- a's pass dropped ")) ?? '';
+    expect(told).toStartWith(`- a's pass dropped ${total(a.summaries)} ${total(a.summaries) === 1 ? 'summary' : 'summaries'} (`);
+    expect(told).toContain(`its compression folds ${a.records} chunk record`);
+    expect(told).toContain(`about ${a.rawTokens.toLocaleString('en-US')} tokens of rows take their full room in a's context.`);
+    expect(written).not.toContain("- b's pass dropped ");
+    expect(written).not.toContain('is not known');
   });
 
   test('where the write joins no long note, the show says none for each agent, and nothing of a join', async () => {
@@ -446,6 +454,25 @@ describe('/sweep, a write that joins a long note', () => {
     expect(shown).toContain('What the write itself would drop, by agent: a: none; b: none.');
     expect(shown).not.toContain('joins a long note');
     expect(shown).not.toContain('nobody is shown a count there');
+    const written = (await h.sweep(NAME, '--write')).text;
+    expect(written).toContain('the open branch has finished it');
+    expect(written).not.toContain("'s pass dropped ");
+    expect(written).not.toContain('is not known');
+  });
+
+  test('after a write, a pass whose report does not say what it dropped is said to have a drop that is not known', async () => {
+    class Untold extends AutobiographicalStrategy {
+      override beforeSweepPass(): () => never {
+        return () => {
+          throw new Error('untold');
+        };
+      }
+    }
+    const h = await host({ strategy: () => new Untold({ ...FOLD }) });
+    h.note(`one ${OLD}`);
+    const written = await h.sweep(NAME, '--write');
+    expect(written.text).toContain('the open branch has finished it');
+    for (const agent of ['a', 'b']) expect(written.text).toContain(`- What ${agent}'s pass dropped is not known: its report doesn't say.`);
   });
 });
 
