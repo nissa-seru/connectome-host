@@ -202,6 +202,7 @@ function writeAnswer(write: FrameworkSweepWrite, command: string): CommandResult
   }
   const took = write.took === null ? `Sweep ${name} took nothing new` : `Sweep ${name} took at ${write.took.at}`;
   const passes = passLines(write.passes, name);
+  const drops = passDrops(write.passes);
   const nothing = write.took === null
     ? ['Nothing was left to rewrite, so nothing was written.']
     : ['Nothing on the open branch needed a rewrite. Each other branch is mended when the host moves to it.'];
@@ -212,11 +213,14 @@ function writeAnswer(write: FrameworkSweepWrite, command: string): CommandResult
     ...(write.oldSummaries.some((each) => total(each.summaries) > 0) ? oldSummariesSaid(name, command) : []),
   ];
   if (write.outcome === 'finished') {
-    return said([`${took}, and the open branch has finished it.`, ...(passes.length > 0 ? passes : nothing), ...threw, ...summaries]);
+    return said([
+      `${took}, and the open branch has finished it.`, ...(passes.length > 0 ? passes : nothing), ...drops, ...threw, ...summaries,
+    ]);
   }
   return refused([
     `${took}, and the open branch has not finished it.`,
     ...passes,
+    ...drops,
     `${counted(write.failed.length, 'body was', 'bodies were')} not rewritten:`,
     ...write.failed.map((failure) => `- Body ${failure.id}: ${failure.error}`),
     ...threw,
@@ -236,6 +240,19 @@ function passLines(passes: readonly AgentSweepPass[], name: string): string[] {
     }
   }
   return lines;
+}
+
+function passDrops(passes: readonly AgentSweepPass[]): string[] {
+  return passes.flatMap(({ agent, report: { dropped } }) => {
+    if (dropped === null) return [`- What ${agent}'s pass dropped is not known: its report doesn't say.`];
+    const count = total(dropped.summaries);
+    if (count === 0) return [];
+    return [
+      `- ${agent}'s pass dropped ${counted(count, 'summary', 'summaries')} (${levelsOf(dropped.summaries)}): its compression ` +
+        `folds ${counted(dropped.records, 'chunk record', 'chunk records')} again, and until it has, about ` +
+        `${dropped.rawTokens.toLocaleString('en-US')} tokens of rows take their full room in ${agent}'s context.`,
+    ];
+  });
 }
 
 function costLines(cost: SummaryDropCost, name: string, agent: string, command: string): string[] {
