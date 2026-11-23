@@ -1,5 +1,6 @@
 import {
-  OperatorActionError, type AgentFramework, type AgentOldSummaries, type AgentSweepPass, type FrameworkSweepReceipt,
+  OperatorActionError, type AgentFramework, type AgentOldSummaries, type AgentSweepPass, type AgentWriteDrops,
+  type FrameworkSweepReceipt,
   type FrameworkSweepShow, type FrameworkSweepWrite, type OperatorRequester,
 } from '@animalabs/agent-framework';
 import type { SummaryDropCost, SummaryLevelCount, StoredContentBlock } from '@animalabs/context-manager';
@@ -100,7 +101,10 @@ function showLines(framework: AgentFramework, entry: { name: string; line: strin
     lines.push(`The store would refuse ${counted(show.failures.length, 'body', 'bodies')}:`);
     for (const failure of show.failures) lines.push(`- Body ${failure.id}: ${failure.error}`);
   }
-  if (show.changes.length > 0) lines.push(`Old summaries that a pass would leave, by agent: ${summariesOf(show.oldSummaries)}.`);
+  if (show.changes.length > 0) {
+    lines.push(`Old summaries that a pass would leave, by agent: ${summariesOf(show.oldSummaries)}.`);
+    lines.push(`What the write itself would drop, by agent: ${dropsOf(show.writeDrops)}.`);
+  }
   if (receipt.take !== null) lines.push(...receiptLines(receipt));
   if (!receipt.finished || show.changes.length > 0 || show.failures.length > 0) lines.push(...beforeAWrite(show, name, asked.command));
   else if (receipt.oldSummaries.some((each) => total(each.summaries) > 0)) lines.push(...oldSummariesSaid(name, asked.command));
@@ -130,12 +134,21 @@ function beforeAWrite(show: FrameworkSweepShow, name: string, command: string): 
   const caches = earliest.size === 0
     ? 'no agent\'s window holds a listed body'
     : [...earliest].map(([agent, at]) => `${agent} from ${at.toISOString()}`).join(', ');
+  const joined = show.writeDrops.reduce((sum, each) => sum + total(each.drops.summaries), 0);
   return [
     'Before a write:',
     '- The list is of the open branch, and a take is for the whole store: each other branch is mended when the host moves to it.',
     '- An ended agent\'s own rows are not in the list. When that agent runs again, a pass mends them.',
     '- No command takes a take back.',
     `- Each listed agent's prompt cache is rewritten once, from its earliest listed body: ${caches}.`,
+    ...(joined === 0
+      ? []
+      : [
+          `- The write joins a long note: it drops ${counted(joined, 'summary', 'summaries')} of that note at once, and each ` +
+            'summary made from them.',
+          '- A resident\'s turn can wait until its compression has folded those rows again.',
+          '- The same happens on each other branch when the host moves to it, and nobody is shown a count there.',
+        ]),
     '- The write does not change an old summary: a summary that an agent\'s memory made from a listed body while the body ' +
       'held its old text. Such a summary can still hold words of that text.',
     `- ${SECOND_ACT} After the write, \`${command} ${name} --summaries AGENT\` shows what it would drop for that agent, and ` +
@@ -257,6 +270,18 @@ function summariesOf(agents: readonly AgentOldSummaries[]): string {
   return agents.map(({ agent, summaries }) => {
     const count = total(summaries);
     return count === 0 ? `${agent}: none` : `${agent}: ${count} (${levelsOf(summaries)})`;
+  }).join('; ');
+}
+
+function dropsOf(agents: readonly AgentWriteDrops[]): string {
+  if (agents.length === 0) return 'no agent is live';
+  return agents.map(({ agent, drops }) => {
+    const count = total(drops.summaries);
+    return count === 0
+      ? `${agent}: none`
+      : `${agent}: ${count} (${levelsOf(drops.summaries)}), and its compression folds ` +
+        `${counted(drops.records, 'chunk record', 'chunk records')} again, with about ${drops.rawTokens.toLocaleString('en-US')} ` +
+        'tokens of rows taking their full room until it has';
   }).join('; ');
 }
 
