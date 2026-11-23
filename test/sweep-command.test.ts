@@ -18,6 +18,8 @@ const NEW = 'NEWWORDS';
 const NAME = 'rewords-test';
 const LINE = 'mends the old words in the faulty test writer\'s notes';
 const QUIET = 'quiet-test';
+const FILLER = 'filler words for the long note ';
+const MORE_FILLER = 'more filler for the note ';
 
 const rewords: SweepEntry = {
   name: NAME,
@@ -26,7 +28,9 @@ const rewords: SweepEntry = {
     if (body.metadata?.writer !== 'faulty') return null;
     if (!body.content.some((b) => b.type === 'text' && b.text.includes(OLD))) return null;
     if (body.content.some((b) => b.type === 'text' && b.text.includes('BOOM'))) throw new Error('boom');
-    return body.content.map((b): StoredContentBlock => (b.type === 'text' ? { type: 'text', text: b.text.replaceAll(OLD, NEW) } : b));
+    return body.content.map((b): StoredContentBlock =>
+      b.type === 'text' ? { type: 'text', text: b.text.replaceAll(OLD, NEW).replaceAll(FILLER, '').replaceAll(MORE_FILLER, '') } : b,
+    );
   },
 };
 const quiet: SweepEntry = { name: QUIET, line: 'mends nothing', mend: () => null };
@@ -399,6 +403,49 @@ describe('/sweep, the old summaries and the second act', () => {
     const dropped = await h.sweep(NAME, '--summaries', 'a', '--write');
     expect(dropped.refused).toBe(false);
     expect(total(h.framework().oldSummaryCost(NAME, 'a').summaries)).toBe(0);
+  });
+});
+
+describe('/sweep, a write that joins a long note', () => {
+  async function foldedLongNote() {
+    const h = await host({ strategy: () => new AutobiographicalStrategy({ ...FOLD, adaptiveResolution: true }) });
+    for (let i = 0; i < 3; i++) h.cm('a').addMessage('User', text(`before ${i}`));
+    h.note(`LONG ${FILLER.repeat(120)}${OLD} in the middle ${MORE_FILLER.repeat(120)}end of LONG`);
+    for (let i = 0; i < 4; i++) h.cm('a').addMessage('User', text(`chat ${i} ${'words '.repeat(60)}`));
+    const cm = h.cm('a');
+    h.present('a', cm.getAllMessages().map((m) => m.id).filter((id) => !cm.getPresentedMessages().some((m) => m.id === id)));
+    await cm.compile(BIG);
+    for (let i = 0; i < 300 && !cm.isReady(); i++) await cm.tick();
+    return h;
+  }
+  const total = (levels: readonly { count: number }[]) => levels.reduce((sum, each) => sum + each.count, 0);
+
+  test('the show gives, for each agent, what the write itself would drop, and before a write it says in plain words what a join does, with the count', async () => {
+    const h = await foldedLongNote();
+    const drops = h.framework().showSweep(NAME).writeDrops;
+    const a = drops.find((each) => each.agent === 'a')!.drops;
+    expect(total(a.summaries)).toBeGreaterThan(0);
+    const shown = (await h.sweep(NAME)).text;
+    expect(shown).toContain('What the write itself would drop, by agent: ');
+    const line = shown.split('\n').find((each) => each.startsWith('What the write itself would drop, by agent: ')) ?? '';
+    expect(line).toContain(`a: ${total(a.summaries)} (`);
+    expect(line).toContain(`${a.records} chunk record`);
+    expect(line).toContain(`${a.rawTokens.toLocaleString('en-US')} tokens`);
+    for (const { agent, drops: each } of drops) if (total(each.summaries) === 0) expect(line).toContain(`${agent}: none`);
+    const sum = drops.reduce((n, each) => n + total(each.drops.summaries), 0);
+    expect(shown).toContain(`- The write joins a long note: it drops ${sum} ${sum === 1 ? 'summary' : 'summaries'} of that note at once, and each summary made from them.`);
+    expect(shown).toContain('- A resident\'s turn can wait until its compression has folded those rows again.');
+    expect(shown).toContain('- The same happens on each other branch when the host moves to it, and nobody is shown a count there.');
+  });
+
+  test('where the write joins no long note, the show says none for each agent, and nothing of a join', async () => {
+    const h = await host();
+    h.note(`one ${OLD}`);
+    for (const agent of ['a', 'b']) h.present(agent, h.cm('a').getAllMessages().map((m) => m.id));
+    const shown = (await h.sweep(NAME)).text;
+    expect(shown).toContain('What the write itself would drop, by agent: a: none; b: none.');
+    expect(shown).not.toContain('joins a long note');
+    expect(shown).not.toContain('nobody is shown a count there');
   });
 });
 
