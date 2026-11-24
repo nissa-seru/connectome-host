@@ -8,6 +8,7 @@ import type { ContextManager, ContextStrategy, MessageId, StoredContentBlock, Sw
 import type { NormalizedRequest, NormalizedResponse, StreamEvent, YieldingStream } from '@animalabs/membrane';
 import { createBranchState, handleCommand, type CommandResult } from '../src/commands.js';
 import { passDrops } from '../src/sweep-command.js';
+import { sweepAsk } from '../src/sweep-words.js';
 
 // The sweep's door in the host: /sweep asks the framework's sweep verbs and
 // says what they give.
@@ -382,6 +383,7 @@ describe('/sweep, the old summaries and the second act', () => {
     await turn.streaming;
     const refused = await h.sweep(NAME, '--summaries', 'a', '--write');
     expect({ refused: refused.refused, held: refused.held }).toEqual({ refused: true, held: false });
+    expect(refused.text).toContain('Run it again when every agent is between turns.');
     expect(h.framework().oldSummaryCost(NAME, 'a')).toEqual(cost);
     turn.release();
     await running;
@@ -527,6 +529,14 @@ test('after a write, an agent whose own pass dropped none where its show counted
   expect(passDrops([{ agent: 'b', report }], [])).toEqual([]);
 });
 
+test('the words refuse a name or an agent that holds whitespace or is empty, which the host would split otherwise', () => {
+  for (const words of [['one two'], [''], ['name', '--summaries', 'a b'], ['name', '--summaries', ''], ['name', '--summaries', 'a b', '--write']]) {
+    expect(sweepAsk(words)).toBeNull();
+  }
+  expect(sweepAsk(['name'])).toEqual({ kind: 'show', name: 'name' });
+  expect(sweepAsk(['name', '--summaries', 'a', '--write'])).toEqual({ kind: 'drop', name: 'name', agent: 'a' });
+});
+
 describe('/sweep, refusals', () => {
   test('a name this host has no entry of is refused, and the answer names the sweeps it has', async () => {
     const h = await host();
@@ -545,6 +555,12 @@ describe('/sweep, refusals', () => {
   test('an agent that is not live, and words /sweep does not take, are refused', async () => {
     const h = await host();
     expect((await h.sweep(NAME, '--summaries', 'nobody')).refused).toBe(true);
+    h.note(`one ${OLD}`);
+    await h.sweep(NAME, '--write');
+    const nobody = await h.sweep(NAME, '--summaries', 'nobody', '--write');
+    expect(nobody.refused).toBe(true);
+    expect(nobody.text).toContain('nobody');
+    expect(nobody.text).not.toContain('between turns');
     for (const words of [[NAME, '--bogus'], [NAME, '--summaries'], [NAME, '--write', 'extra'], [NAME, '--summaries', 'a', '--bogus'],
       [NAME, '--summaries', 'a', '--write', 'extra']]) {
       const said = await h.sweep(...words);
