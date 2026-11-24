@@ -360,6 +360,8 @@ describe('/sweep, the old summaries and the second act', () => {
     }
     const written = await h.sweep(NAME, '--write');
     expect(written.text).toContain('can still hold words of the old text');
+    expect(written.text).toContain('Until it has, its context holds those rows in full, and its turn can wait until then.');
+    expect(written.text).not.toContain('full room');
     expect((await h.sweep(NAME)).text).toContain('can still hold words of the old text');
     const cost = h.framework().oldSummaryCost(NAME, 'a');
     const before = h.sequence();
@@ -368,7 +370,8 @@ describe('/sweep, the old summaries and the second act', () => {
     expect(costSaid.refused).toBe(false);
     expect(costSaid.text).toContain(`would drop ${total(cost.summaries)} old`);
     expect(costSaid.text).toContain(`${cost.records} chunk record`);
-    expect(costSaid.text).toContain(`${cost.rawTokens.toLocaleString('en-US')} tokens`);
+    expect(costSaid.text).toContain(`Until it has, a's context holds about ${cost.rawTokens.toLocaleString('en-US')} tokens of rows in full, and ` +
+      "a's turn can wait until then.");
     expect(costSaid.text).toContain(`connectome sweep ${NAME} --summaries a --write`);
 
     const turn = h.holdFor('You are b.');
@@ -386,6 +389,9 @@ describe('/sweep, the old summaries and the second act', () => {
     const dropped = await h.sweep(NAME, '--summaries', 'a', '--write');
     expect(dropped.refused).toBe(false);
     expect(dropped.text).toContain(`dropped ${total(cost.summaries)} old`);
+    expect(dropped.text).toContain(`Until it has, a's context holds about ${cost.rawTokens.toLocaleString('en-US')} tokens of rows in full, and ` +
+      "a's turn can wait until then.");
+    expect(dropped.text).not.toContain('full room');
     expect(total(h.framework().oldSummaryCost(NAME, 'a').summaries)).toBe(0);
     expect(total(h.framework().oldSummaryCost(NAME, 'b').summaries)).toBe(otherBefore);
   });
@@ -407,15 +413,18 @@ describe('/sweep, the old summaries and the second act', () => {
 });
 
 describe('/sweep, a write that joins a long note', () => {
-  async function foldedLongNote() {
+  async function foldedLongNote(residents: readonly string[] = ['a']) {
     const h = await host({ strategy: () => new AutobiographicalStrategy({ ...FOLD, adaptiveResolution: true }) });
     for (let i = 0; i < 3; i++) h.cm('a').addMessage('User', text(`before ${i}`));
     h.note(`LONG ${FILLER.repeat(120)}${OLD} in the middle ${MORE_FILLER.repeat(120)}end of LONG`);
     for (let i = 0; i < 4; i++) h.cm('a').addMessage('User', text(`chat ${i} ${'words '.repeat(60)}`));
-    const cm = h.cm('a');
-    h.present('a', cm.getAllMessages().map((m) => m.id).filter((id) => !cm.getPresentedMessages().some((m) => m.id === id)));
-    await cm.compile(BIG);
-    for (let i = 0; i < 300 && !cm.isReady(); i++) await cm.tick();
+    const all = h.cm('a').getAllMessages().map((m) => m.id);
+    for (const agent of residents) {
+      const cm = h.cm(agent);
+      h.present(agent, all.filter((id) => !cm.getPresentedMessages().some((m) => m.id === id)));
+      await cm.compile(BIG);
+      for (let i = 0; i < 300 && !cm.isReady(); i++) await cm.tick();
+    }
     return h;
   }
   const total = (levels: readonly { count: number }[]) => levels.reduce((sum, each) => sum + each.count, 0);
@@ -430,20 +439,31 @@ describe('/sweep, a write that joins a long note', () => {
     const line = shown.split('\n').find((each) => each.startsWith('What the write itself would drop, by agent: ')) ?? '';
     expect(line).toContain(`a: ${total(a.summaries)} (`);
     expect(line).toContain(`${a.records} chunk record`);
-    expect(line).toContain(`${a.rawTokens.toLocaleString('en-US')} tokens`);
+    expect(line).toContain(`again; until it has, a's context holds about ${a.rawTokens.toLocaleString('en-US')} tokens of rows in full`);
     for (const { agent, drops: each } of drops) if (total(each.summaries) === 0) expect(line).toContain(`${agent}: none`);
     const sum = drops.reduce((n, each) => n + total(each.drops.summaries), 0);
     expect(shown).toContain(`- The write joins a long note: it drops ${sum} ${sum === 1 ? 'summary' : 'summaries'} of that note at once, and each summary made from them.`);
-    expect(shown).toContain('- A resident\'s turn can wait until its compression has folded those rows again.');
+    expect(shown).toContain("- a's turn can wait until its compression has folded those rows again.");
+    expect(shown).not.toContain("b's turn can wait");
+    expect(shown).not.toContain('full room');
     expect(shown).toContain('- The same happens on each other branch when the host moves to it, and nobody is shown a count there.');
 
     const written = (await h.sweep(NAME, '--write')).text;
     const told = written.split('\n').find((each) => each.startsWith("- a's pass dropped ")) ?? '';
     expect(told).toStartWith(`- a's pass dropped ${total(a.summaries)} ${total(a.summaries) === 1 ? 'summary' : 'summaries'} (`);
     expect(told).toContain(`its compression folds ${a.records} chunk record`);
-    expect(told).toContain(`about ${a.rawTokens.toLocaleString('en-US')} tokens of rows take their full room in a's context.`);
+    expect(told).toContain(`and until it has, a's context holds about ${a.rawTokens.toLocaleString('en-US')} tokens of rows in full.`);
+    expect(written).not.toContain('full room');
     expect(written).not.toContain("- b's pass dropped ");
     expect(written).not.toContain('is not known');
+  });
+
+  test('where two residents drop, the wait line names both', async () => {
+    const h = await foldedLongNote(['a', 'b']);
+    const drops = h.framework().showSweep(NAME).writeDrops;
+    if (drops.some(({ drops: each }) => total(each.summaries) === 0)) throw new Error(`premise: a and b both drop, ${JSON.stringify(drops)}`);
+    const shown = (await h.sweep(NAME)).text;
+    expect(shown).toContain('- The turns of a and b can wait until their compression has folded those rows again.');
   });
 
   test('where the write joins no long note, the show says none for each agent, and nothing of a join', async () => {
