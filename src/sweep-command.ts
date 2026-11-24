@@ -263,7 +263,7 @@ export function passLines(passes: readonly AgentSweepPass[], name: string, comma
       }
       if (outcome.rewritten.length === 0 && outcome.removed.length === 0 && outcome.failed.length === 0) continue;
       const problem = outcome.failed.length > 0 ? `, and it reported a problem with ${counted(outcome.failed.length, 'body', 'bodies')}` : '';
-      const owed = outcome.outcome === 'owed' ? ` ${outcome.name} is still owed here: \`${command} ${outcome.name} --write\` asks again.` : '';
+      const owed = outcome.outcome === 'owed' ? ` That pass left ${outcome.name} owed. \`${command} ${outcome.name}\` shows where it stands now.` : '';
       lines.push(`- ${agent}'s pass also applied sweep ${outcome.name}, which the store took before: it rewrote ${did}${problem}.${owed}`);
     }
   }
