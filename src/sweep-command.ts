@@ -40,10 +40,11 @@ export function handleSweep(words: readonly string[], asked: SweepAsked): Comman
     const entry = entries.find((each) => each.name === ask.name);
     if (entry === undefined) return refused([`No sweep is named ${ask.name}. ${namesOf(entries)}`]);
     if (ask.kind === 'show') return said(showLines(framework, entry, asked));
+    const shown = framework.showSweep(ask.name).writeDrops;
     return {
       ...said([`Writing sweep ${ask.name}…`]),
       asyncWork: framework.takeSweep(ask.name, { requester: asked.requester })
-        .then((write) => writeAnswer(write, asked.command), refusedFor),
+        .then((write) => writeAnswer(write, shown, asked.command), refusedFor),
     };
   }
   // The second act needs no entry: a taken sweep whose entry this host no longer has still has old summaries. The
@@ -187,7 +188,7 @@ function notReached(asked: SweepAsked): string[] {
   ];
 }
 
-function writeAnswer(write: FrameworkSweepWrite, command: string): CommandResult {
+function writeAnswer(write: FrameworkSweepWrite, shown: readonly AgentWriteDrops[], command: string): CommandResult {
   const { name } = write;
   if (write.outcome === 'held') {
     return {
@@ -202,7 +203,7 @@ function writeAnswer(write: FrameworkSweepWrite, command: string): CommandResult
   }
   const took = write.took === null ? `Sweep ${name} took nothing new` : `Sweep ${name} took at ${write.took.at}`;
   const passes = passLines(write.passes, name);
-  const drops = passDrops(write.passes);
+  const drops = passDrops(write.passes, shown);
   const nothing = write.took === null
     ? ['Nothing was left to rewrite, so nothing was written.']
     : ['Nothing on the open branch needed a rewrite. Each other branch is mended when the host moves to it.'];
@@ -242,14 +243,24 @@ function passLines(passes: readonly AgentSweepPass[], name: string): string[] {
   return lines;
 }
 
-function passDrops(passes: readonly AgentSweepPass[]): string[] {
+/**
+ * What each agent dropped at its own pass. A pass of another agent on the same slot can drop an agent's summaries before
+ * its own pass runs, and no report counts those, so where the show before the write counted more, the line says both.
+ */
+function passDrops(passes: readonly AgentSweepPass[], shown: readonly AgentWriteDrops[]): string[] {
   return passes.flatMap(({ agent, report: { dropped } }) => {
     if (dropped === null) return [`- What ${agent}'s pass dropped is not known: its report doesn't say.`];
     const count = total(dropped.summaries);
-    if (count === 0) return [];
+    const forecast = total(shown.find((each) => each.agent === agent)?.drops.summaries ?? []);
+    const more = forecast > count
+      ? ` The show before the write counted ${forecast} for ${agent}: a pass of another agent on the same slot can drop an ` +
+        'agent\'s summaries before its own pass runs.'
+      : '';
+    if (count === 0) return more === '' ? [] : [`- ${agent} dropped no summary at its own pass.${more}`];
     return [
-      `- ${agent}'s pass dropped ${counted(count, 'summary', 'summaries')} (${levelsOf(dropped.summaries)}): its compression ` +
-        `folds ${counted(dropped.records, 'chunk record', 'chunk records')} again, and until it has, ${heldInFull(agent, dropped)}.`,
+      `- ${agent} dropped ${counted(count, 'summary', 'summaries')} at its own pass (${levelsOf(dropped.summaries)}): its ` +
+        `compression folds ${counted(dropped.records, 'chunk record', 'chunk records')} again, and until it has, ` +
+        `${heldInFull(agent, dropped)}.${more}`,
     ];
   });
 }

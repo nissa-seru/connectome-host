@@ -51,6 +51,7 @@ await runHeadless({
     },
     // /sweep's verbs, for a take that the store applies later (test/headless-command-done.test.ts).
     listSweeps: () => [{ name: 'held-test', line: 'is applied later' }],
+    showSweep: (name: string) => ({ name, line: 'is applied later', changes: [], failures: [], oldSummaries: [], writeDrops: [] }),
     takeSweep: async (name: string) => ({
       outcome: 'held', name, took: { take: 'take-1', name, at: '2026-11-20T00:00:00.000Z' },
       refusal: 'Cannot sweep while fixture is inferring',
