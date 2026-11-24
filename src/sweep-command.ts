@@ -61,7 +61,7 @@ export function handleSweep(words: readonly string[], asked: SweepAsked): Comman
     asyncWork: framework.dropOldSummaries(ask.name, ask.agent, { requester: asked.requester })
       .then((dropped) => said(droppedLines(dropped, ask.name, ask.agent)),
         (error) => refusedFor(error, 'The second act wasn\'t made, and nothing was dropped: ',
-          ' Run it again when every agent is between turns.')),
+          error instanceof OperatorActionError && error.code === 'agent-busy' ? ' Run it again when every agent is between turns.' : '')),
   };
 }
 
