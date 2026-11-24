@@ -449,12 +449,13 @@ describe('/sweep, a write that joins a long note', () => {
     expect(shown).toContain('- The same happens on each other branch when the host moves to it, and nobody is shown a count there.');
 
     const written = (await h.sweep(NAME, '--write')).text;
-    const told = written.split('\n').find((each) => each.startsWith("- a's pass dropped ")) ?? '';
-    expect(told).toStartWith(`- a's pass dropped ${total(a.summaries)} ${total(a.summaries) === 1 ? 'summary' : 'summaries'} (`);
+    const told = written.split('\n').find((each) => each.startsWith('- a dropped ')) ?? '';
+    expect(told).toStartWith(`- a dropped ${total(a.summaries)} ${total(a.summaries) === 1 ? 'summary' : 'summaries'} at its own pass (`);
+    expect(told).not.toContain('The show before the write counted');
     expect(told).toContain(`its compression folds ${a.records} chunk record`);
     expect(told).toContain(`and until it has, a's context holds about ${a.rawTokens.toLocaleString('en-US')} tokens of rows in full.`);
     expect(written).not.toContain('full room');
-    expect(written).not.toContain("- b's pass dropped ");
+    expect(written).not.toContain('- b dropped ');
     expect(written).not.toContain('is not known');
   });
 
@@ -464,6 +465,24 @@ describe('/sweep, a write that joins a long note', () => {
     if (drops.some(({ drops: each }) => total(each.summaries) === 0)) throw new Error(`premise: a and b both drop, ${JSON.stringify(drops)}`);
     const shown = (await h.sweep(NAME)).text;
     expect(shown).toContain('- The turns of a and b can wait until their compression has folded those rows again.');
+  });
+
+  test('after a write, an agent whose own pass dropped less than the show counted for it gets both numbers, and the reason as what can happen', async () => {
+    const h = await foldedLongNote(['a', 'b']);
+    const counted = new Map(h.framework().showSweep(NAME).writeDrops.map(({ agent, drops }) => [agent, total(drops.summaries)]));
+    const written = (await h.sweep(NAME, '--write')).text;
+    const lines = new Map(['a', 'b'].map((agent) => [agent, written.split('\n').find((each) => each.startsWith(`- ${agent} dropped `)) ?? '']));
+    const own = (agent: string) => {
+      const said = /^- \w+ dropped (no|\d+) summar/.exec(lines.get(agent)!)?.[1];
+      return said === undefined ? -1 : said === 'no' ? 0 : Number(said);
+    };
+    for (const agent of ['a', 'b']) expect(lines.get(agent)).toContain(' at its own pass');
+    if (own('b') >= counted.get('b')! || own('a') !== counted.get('a')) {
+      throw new Error(`premise: b's own pass drops less than its show, a's as many, ${JSON.stringify([...counted])} ${written}`);
+    }
+    expect(lines.get('b')).toEndWith(`The show before the write counted ${counted.get('b')} for b: a pass of another agent on the same slot can ` +
+      'drop an agent\'s summaries before its own pass runs.');
+    expect(lines.get('a')).not.toContain('The show before the write counted');
   });
 
   test('where the write joins no long note, the show says none for each agent, and nothing of a join', async () => {
@@ -476,7 +495,7 @@ describe('/sweep, a write that joins a long note', () => {
     expect(shown).not.toContain('nobody is shown a count there');
     const written = (await h.sweep(NAME, '--write')).text;
     expect(written).toContain('the open branch has finished it');
-    expect(written).not.toContain("'s pass dropped ");
+    expect(written).not.toContain(' at its own pass');
     expect(written).not.toContain('is not known');
   });
 
