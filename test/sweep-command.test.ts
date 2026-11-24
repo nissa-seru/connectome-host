@@ -325,10 +325,10 @@ describe('/sweep NAME --write', () => {
     expect(textOf(h.cm('a').getMessage(id)!.content)).toBe(`first ${NEW}`);
     expect(other.text).not.toContain('needed a rewrite');
     expect(other.text).toContain(`- a's pass also applied sweep ${NAME}, which the store took before: it rewrote 1 body.`);
-    expect(other.text).not.toContain('still owed');
+    expect(other.text).not.toContain('owed');
   });
 
-  test('a write of one sweep names another owed sweep whose pass had a problem, and says that it is still owed', async () => {
+  test('a write of one sweep names another owed sweep whose pass had a problem, says that the pass left it owed, and points at the show', async () => {
     const h = await host();
     h.note(`fine ${OLD}`);
     h.note(`BOOM ${OLD}`);
@@ -342,7 +342,7 @@ describe('/sweep NAME --write', () => {
     await running;
     const other = await h.sweep(QUIET, '--write');
     expect(other.text).toContain(`- a's pass also applied sweep ${NAME}, which the store took before: it rewrote 1 body, and it ` +
-      `reported a problem with 1 body. ${NAME} is still owed here: \`connectome sweep ${NAME} --write\` asks again.`);
+      `reported a problem with 1 body. That pass left ${NAME} owed. \`connectome sweep ${NAME}\` shows where it stands now.`);
   });
 
   test('a write where a body had a problem during the pass ends refused, names each such body with why, and mends the rest', async () => {
@@ -585,7 +585,7 @@ test('after a write, another owed sweep whose pass had a problem and rewrote not
   const report = { slot: 's', branch: 'main', sweeps: [older], stopped: null, unreadable: { items: [], takes: [] }, dropped: null };
   expect(passLines([{ agent: 'a', report }], 'n', 'connectome sweep')).toEqual([
     "- a's pass also applied sweep older, which the store took before: it rewrote 0 bodies, and it reported a problem with 1 body. " +
-      'older is still owed here: `connectome sweep older --write` asks again.',
+      'That pass left older owed. `connectome sweep older` shows where it stands now.',
   ]);
 });
 
