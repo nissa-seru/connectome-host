@@ -7,6 +7,7 @@ import { AutobiographicalStrategy } from '@animalabs/context-manager';
 import type { ContextManager, ContextStrategy, MessageId, StoredContentBlock, SweepEntry } from '@animalabs/context-manager';
 import type { NormalizedRequest, NormalizedResponse, StreamEvent, YieldingStream } from '@animalabs/membrane';
 import { createBranchState, handleCommand, type CommandResult } from '../src/commands.js';
+import { passDrops } from '../src/sweep-command.js';
 
 // The sweep's door in the host: /sweep asks the framework's sweep verbs and
 // says what they give.
@@ -513,6 +514,17 @@ describe('/sweep, a write that joins a long note', () => {
     expect(written.text).toContain('the open branch has finished it');
     for (const agent of ['a', 'b']) expect(written.text).toContain(`- What ${agent}'s pass dropped is not known: its report doesn't say.`);
   });
+});
+
+test('after a write, an agent whose own pass dropped none where its show counted some gets a line with both numbers', () => {
+  const none = { summaries: [], records: 0, rawTokens: 0 };
+  const report = { slot: 's', branch: 'main', sweeps: [], stopped: null, unreadable: { items: [], takes: [] }, dropped: none };
+  const shown = [{ agent: 'b', drops: { summaries: [{ level: 1, count: 10 }], records: 2, rawTokens: 404 } }];
+  expect(passDrops([{ agent: 'b', report }], shown)).toEqual([
+    '- b dropped no summary at its own pass. The show before the write counted 10 for b: a pass of another agent on the same ' +
+      'slot can drop an agent\'s summaries before its own pass runs.',
+  ]);
+  expect(passDrops([{ agent: 'b', report }], [])).toEqual([]);
 });
 
 describe('/sweep, refusals', () => {

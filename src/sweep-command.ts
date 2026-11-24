@@ -247,7 +247,7 @@ function passLines(passes: readonly AgentSweepPass[], name: string): string[] {
  * What each agent dropped at its own pass. A pass of another agent on the same slot can drop an agent's summaries before
  * its own pass runs, and no report counts those, so where the show before the write counted more, the line says both.
  */
-function passDrops(passes: readonly AgentSweepPass[], shown: readonly AgentWriteDrops[]): string[] {
+export function passDrops(passes: readonly AgentSweepPass[], shown: readonly AgentWriteDrops[]): string[] {
   return passes.flatMap(({ agent, report: { dropped } }) => {
     if (dropped === null) return [`- What ${agent}'s pass dropped is not known: its report doesn't say.`];
     const count = total(dropped.summaries);
