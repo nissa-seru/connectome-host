@@ -7,7 +7,7 @@ import { AutobiographicalStrategy } from '@animalabs/context-manager';
 import type { ContextManager, ContextStrategy, MessageId, StoredContentBlock, SweepEntry } from '@animalabs/context-manager';
 import type { NormalizedRequest, NormalizedResponse, StreamEvent, YieldingStream } from '@animalabs/membrane';
 import { createBranchState, handleCommand, type CommandResult } from '../src/commands.js';
-import { passDrops } from '../src/sweep-command.js';
+import { forecastLines, passDrops, textOf as bodyText } from '../src/sweep-command.js';
 import { sweepAsk } from '../src/sweep-words.js';
 
 // The sweep's door in the host: /sweep asks the framework's sweep verbs and
@@ -310,6 +310,41 @@ describe('/sweep NAME --write', () => {
     expect(textOf(h.cm('a').getMessage(id)!.content)).toBe(`first ${NEW}`);
   });
 
+  test('a write of one sweep that also applies another owed sweep says what the other did, and not that nothing needed a rewrite', async () => {
+    const h = await host();
+    const id = h.note(`first ${OLD}`);
+    const turn = h.holdFor('You are b.');
+    cleanups.push(async () => { turn.release(); });
+    h.framework().nudgeAgent('b', 'test');
+    const running = h.framework().runUntilIdle();
+    await turn.streaming;
+    expect((await h.sweep(NAME, '--write')).held).toBe(true);
+    turn.release();
+    await running;
+    const other = await h.sweep(QUIET, '--write');
+    expect(textOf(h.cm('a').getMessage(id)!.content)).toBe(`first ${NEW}`);
+    expect(other.text).not.toContain('needed a rewrite');
+    expect(other.text).toContain(`- a's pass also applied sweep ${NAME}, which the store took before: it rewrote 1 body.`);
+    expect(other.text).not.toContain('still owed');
+  });
+
+  test('a write of one sweep names another owed sweep whose pass had a problem, and says that it is still owed', async () => {
+    const h = await host();
+    h.note(`fine ${OLD}`);
+    h.note(`BOOM ${OLD}`);
+    const turn = h.holdFor('You are b.');
+    cleanups.push(async () => { turn.release(); });
+    h.framework().nudgeAgent('b', 'test');
+    const running = h.framework().runUntilIdle();
+    await turn.streaming;
+    expect((await h.sweep(NAME, '--write')).held).toBe(true);
+    turn.release();
+    await running;
+    const other = await h.sweep(QUIET, '--write');
+    expect(other.text).toContain(`- a's pass also applied sweep ${NAME}, which the store took before: it rewrote 1 body, and it ` +
+      `reported a problem with 1 body. ${NAME} is still owed here: \`connectome sweep ${NAME} --write\` asks again.`);
+  });
+
   test('a write that leaves a body ends refused, names each body not rewritten with why, and mends the rest', async () => {
     const h = await host();
     const fine = h.note(`fine ${OLD}`);
@@ -405,6 +440,18 @@ describe('/sweep, the old summaries and the second act', () => {
     await h.restart([quiet]);
     const left = total(h.framework().oldSummaryCost(NAME, 'a').summaries);
     expect(left).toBeGreaterThan(0);
+    const receipt = await h.sweep(NAME);
+    expect(receipt.refused).toBe(false);
+    expect(receipt.text).toContain(`This host has no entry named ${NAME}. It can show the receipt, but can't preview a new repair or take it ` +
+      'again. The store took it at ');
+    expect(receipt.text).toContain('Passes on the open branch:');
+    expect(receipt.text).toContain(`Old summaries now, by agent: a: ${left} (`);
+    const again = await h.sweep(NAME, '--write');
+    expect(again.refused).toBe(true);
+    expect(again.text).toContain(`This host has no entry named ${NAME}. It can show the receipt, but can't preview a new repair or take it again.`);
+    const never = await h.sweep('never-taken');
+    expect(never.refused).toBe(true);
+    expect(never.text).toContain('No sweep is named never-taken.');
     const cost = await h.sweep(NAME, '--summaries', 'a');
     expect(cost.refused).toBe(false);
     expect(cost.text).toContain(`would drop ${left} old`);
@@ -522,11 +569,21 @@ test('after a write, an agent whose own pass dropped none where its show counted
   const none = { summaries: [], records: 0, rawTokens: 0 };
   const report = { slot: 's', branch: 'main', sweeps: [], stopped: null, unreadable: { items: [], takes: [] }, dropped: none };
   const shown = [{ agent: 'b', drops: { summaries: [{ level: 1, count: 10 }], records: 2, rawTokens: 404 } }];
-  expect(passDrops([{ agent: 'b', report }], shown)).toEqual([
+  expect(passDrops([{ agent: 'b', report }], shown, 'n')).toEqual([
     '- b dropped no summary at its own pass. The show before the write counted 10 for b: a pass of another agent on the same ' +
       'slot can drop an agent\'s summaries before its own pass runs.',
   ]);
-  expect(passDrops([{ agent: 'b', report }], [])).toEqual([]);
+  expect(passDrops([{ agent: 'b', report }], [], 'n')).toEqual([]);
+});
+
+test('after a write, a drop of a pass that also applied another sweep is said to be for every sweep it applied', () => {
+  const dropped = { summaries: [{ level: 1, count: 3 }], records: 1, rawTokens: 50 };
+  const other = { name: 'older', take: 't0', outcome: 'finished' as const, rewritten: ['m1'], removed: [], failed: [] };
+  const report = { slot: 's', branch: 'main', sweeps: [other], stopped: null, unreadable: { items: [], takes: [] }, dropped };
+  expect(passDrops([{ agent: 'a', report }], [], 'n')).toEqual([
+    "- a dropped 3 summaries at its own pass, for every sweep it applied (3 at level 1): its compression folds 1 chunk record again, " +
+      "and until it has, a's context holds about 50 tokens of rows in full.",
+  ]);
 });
 
 test('the words refuse a name or an agent that holds whitespace or is empty, which the host would split otherwise', () => {
@@ -535,6 +592,25 @@ test('the words refuse a name or an agent that holds whitespace or is empty, whi
   }
   expect(sweepAsk(['name'])).toEqual({ kind: 'show', name: 'name' });
   expect(sweepAsk(['name', '--summaries', 'a', '--write'])).toEqual({ kind: 'drop', name: 'name', agent: 'a' });
+});
+
+test('the forecast gives each agent\'s drop also where no body changes, as after a pass that stopped before it removed a note\'s later shards', () => {
+  const drops = { summaries: [{ level: 1, count: 3 }], records: 1, rawTokens: 50 };
+  const none = { summaries: [], records: 0, rawTokens: 0 };
+  const show = { name: 'n', line: 'l', changes: [], failures: [], oldSummaries: [], writeDrops: [{ agent: 'a', drops }, { agent: 'b', drops: none }] };
+  expect(forecastLines(show)).toEqual([
+    "What the write itself would drop, by agent: a: 3 (3 at level 1), and its compression folds 1 chunk record again; until it has, a's " +
+      "context holds about 50 tokens of rows in full; b: none.",
+  ]);
+  expect(forecastLines({ ...show, writeDrops: [{ agent: 'a', drops: none }] })).toEqual([]);
+});
+
+test('a body\'s new text shows a tool result\'s text, and any other block by its kind alone', () => {
+  expect(bodyText([{ type: 'text', text: 'Note' }, { type: 'tool_result', toolUseId: 't1', content: 'Calendar edition 2' }])).toBe(
+    'Note\n[tool_result] Calendar edition 2');
+  expect(bodyText([{ type: 'tool_result', toolUseId: 't2', content: [{ type: 'text', text: 'one' }, { type: 'text', text: 'two' }] }])).toBe(
+    '[tool_result] one\ntwo');
+  expect(bodyText([{ type: 'blob_ref', ref: { hash: 'h', mediaType: 'image/png', originalType: 'image' } }])).toBe('[blob_ref]');
 });
 
 describe('/sweep, refusals', () => {

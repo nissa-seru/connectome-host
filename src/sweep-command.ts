@@ -102,15 +102,21 @@ function showLines(framework: AgentFramework, entry: { name: string; line: strin
     lines.push(`The store would refuse ${counted(show.failures.length, 'body', 'bodies')}:`);
     for (const failure of show.failures) lines.push(`- Body ${failure.id}: ${failure.error}`);
   }
-  if (show.changes.length > 0) {
-    lines.push(`Old summaries that a pass would leave, by agent: ${summariesOf(show.oldSummaries)}.`);
-    lines.push(`What the write itself would drop, by agent: ${dropsOf(show.writeDrops)}.`);
-  }
+  lines.push(...forecastLines(show));
   if (receipt.take !== null) lines.push(...receiptLines(receipt));
   if (!receipt.finished || show.changes.length > 0 || show.failures.length > 0) lines.push(...beforeAWrite(show, name, asked.command));
   else if (receipt.oldSummaries.some((each) => total(each.summaries) > 0)) lines.push(...oldSummariesSaid(name, asked.command));
   lines.push(...notReached(asked));
   return lines;
+}
+
+/** What a pass would leave old, and what the write itself would drop, for each agent. */
+export function forecastLines(show: FrameworkSweepShow): string[] {
+  if (show.changes.length === 0) return [];
+  return [
+    `Old summaries that a pass would leave, by agent: ${summariesOf(show.oldSummaries)}.`,
+    `What the write itself would drop, by agent: ${dropsOf(show.writeDrops)}.`,
+  ];
 }
 
 function receiptLines(receipt: FrameworkSweepReceipt): string[] {
@@ -203,7 +209,7 @@ function writeAnswer(write: FrameworkSweepWrite, shown: readonly AgentWriteDrops
   }
   const took = write.took === null ? `Sweep ${name} took nothing new` : `Sweep ${name} took at ${write.took.at}`;
   const passes = passLines(write.passes, name);
-  const drops = passDrops(write.passes, shown);
+  const drops = passDrops(write.passes, shown, name);
   const nothing = write.took === null
     ? ['Nothing was left to rewrite, so nothing was written.']
     : ['Nothing on the open branch needed a rewrite. Each other branch is mended when the host moves to it.'];
@@ -247,7 +253,7 @@ function passLines(passes: readonly AgentSweepPass[], name: string): string[] {
  * What each agent dropped at its own pass. A pass of another agent on the same slot can drop an agent's summaries before
  * its own pass runs, and no report counts those, so where the show before the write counted more, the line says both.
  */
-export function passDrops(passes: readonly AgentSweepPass[], shown: readonly AgentWriteDrops[]): string[] {
+export function passDrops(passes: readonly AgentSweepPass[], shown: readonly AgentWriteDrops[], _name: string): string[] {
   return passes.flatMap(({ agent, report: { dropped } }) => {
     if (dropped === null) return [`- What ${agent}'s pass dropped is not known: its report doesn't say.`];
     const count = total(dropped.summaries);
@@ -333,7 +339,7 @@ function windowOf(agents: readonly string[]): string {
   return agents.length === 0 ? 'in no agent\'s window' : `in the window of ${listed(agents)}`;
 }
 
-function textOf(content: readonly StoredContentBlock[]): string {
+export function textOf(content: readonly StoredContentBlock[]): string {
   return content.map((block) => (block.type === 'text' ? block.text : `[${block.type}]`)).join('\n');
 }
 
