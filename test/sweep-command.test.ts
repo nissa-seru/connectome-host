@@ -345,7 +345,7 @@ describe('/sweep NAME --write', () => {
       `reported a problem with 1 body. ${NAME} is still owed here: \`connectome sweep ${NAME} --write\` asks again.`);
   });
 
-  test('a write that leaves a body ends refused, names each body not rewritten with why, and mends the rest', async () => {
+  test('a write where a body had a problem during the pass ends refused, names each such body with why, and mends the rest', async () => {
     const h = await host();
     const fine = h.note(`fine ${OLD}`);
     const boom = h.note(`BOOM ${OLD}`);
@@ -355,7 +355,11 @@ describe('/sweep NAME --write', () => {
     expect(line).toContain('Error');
     const lines = said.text.split('\n');
     const under: string[] = [];
-    for (let i = lines.findIndex((each) => each.endsWith('not rewritten:')) + 1; i > 0 && lines[i]?.startsWith('- '); i++) under.push(lines[i]!);
+    expect(said.text).toContain('1 body had a problem during the pass:');
+    expect(said.text).not.toContain('not rewritten');
+    for (let i = lines.findIndex((each) => each.endsWith('had a problem during the pass:')) + 1; i > 0 && lines[i]?.startsWith('- '); i++) {
+      under.push(lines[i]!);
+    }
     expect(under).toEqual([line]);
     expect(textOf(h.cm('a').getMessage(fine)!.content)).toBe(`fine ${NEW}`);
   });
