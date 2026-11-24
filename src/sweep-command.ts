@@ -38,7 +38,12 @@ export function handleSweep(words: readonly string[], asked: SweepAsked): Comman
   if (ask.kind === 'list') return said(listLines(framework, entries));
   if (ask.kind === 'show' || ask.kind === 'write') {
     const entry = entries.find((each) => each.name === ask.name);
-    if (entry === undefined) return refused([`No sweep is named ${ask.name}. ${namesOf(entries)}`]);
+    if (entry === undefined) {
+      const receipt = framework.sweepReceipt(ask.name);
+      if (receipt.take === null) return refused([`No sweep is named ${ask.name}. ${namesOf(entries)}`]);
+      const lines = noEntryLines(receipt, receipt.take.at, asked.command);
+      return ask.kind === 'show' ? said(lines) : refused(lines);
+    }
     if (ask.kind === 'show') return said(showLines(framework, entry, asked));
     const shown = framework.showSweep(ask.name).writeDrops;
     return {
@@ -112,10 +117,19 @@ function showLines(framework: AgentFramework, entry: { name: string; line: strin
 
 /** What a pass would leave old, and what the write itself would drop, for each agent. */
 export function forecastLines(show: FrameworkSweepShow): string[] {
-  if (show.changes.length === 0) return [];
+  const drops = `What the write itself would drop, by agent: ${dropsOf(show.writeDrops)}.`;
+  if (show.changes.length > 0) return [`Old summaries that a pass would leave, by agent: ${summariesOf(show.oldSummaries)}.`, drops];
+  return show.writeDrops.some((each) => total(each.drops.summaries) > 0) ? [drops] : [];
+}
+
+/** A sweep that the store took and whose entry this host no longer has: its receipt, which needs no entry. */
+function noEntryLines(receipt: FrameworkSweepReceipt, at: string, command: string): string[] {
+  const { name } = receipt;
   return [
-    `Old summaries that a pass would leave, by agent: ${summariesOf(show.oldSummaries)}.`,
-    `What the write itself would drop, by agent: ${dropsOf(show.writeDrops)}.`,
+    `This host has no entry named ${name}. It can show the receipt, but can't preview a new repair or take it again. The ` +
+      `store took it at ${at}, and it is ${receipt.finished ? 'finished here' : 'not finished here'}.`,
+    ...receiptLines(receipt),
+    ...(receipt.oldSummaries.some((each) => total(each.summaries) > 0) ? oldSummariesSaid(name, command) : []),
   ];
 }
 
@@ -208,7 +222,7 @@ function writeAnswer(write: FrameworkSweepWrite, shown: readonly AgentWriteDrops
     };
   }
   const took = write.took === null ? `Sweep ${name} took nothing new` : `Sweep ${name} took at ${write.took.at}`;
-  const passes = passLines(write.passes, name);
+  const passes = passLines(write.passes, name, command);
   const drops = passDrops(write.passes, shown, name);
   const nothing = write.took === null
     ? ['Nothing was left to rewrite, so nothing was written.']
@@ -237,13 +251,20 @@ function writeAnswer(write: FrameworkSweepWrite, shown: readonly AgentWriteDrops
   ]);
 }
 
-function passLines(passes: readonly AgentSweepPass[], name: string): string[] {
+function passLines(passes: readonly AgentSweepPass[], name: string, command: string): string[] {
   const lines: string[] = [];
   for (const { agent, report } of passes) {
-    for (const outcome of report.sweeps.filter((each) => each.name === name)) {
-      if (outcome.rewritten.length === 0 && outcome.removed.length === 0) continue;
-      lines.push(`- ${agent}'s pass rewrote ${counted(outcome.rewritten.length, 'body', 'bodies')}` +
-        (outcome.removed.length > 0 ? ` and removed ${counted(outcome.removed.length, 'later shard', 'later shards')}` : '') + '.');
+    for (const outcome of report.sweeps) {
+      const did = `${counted(outcome.rewritten.length, 'body', 'bodies')}` +
+        (outcome.removed.length > 0 ? ` and removed ${counted(outcome.removed.length, 'later shard', 'later shards')}` : '');
+      if (outcome.name === name) {
+        if (outcome.rewritten.length > 0 || outcome.removed.length > 0) lines.push(`- ${agent}'s pass rewrote ${did}.`);
+        continue;
+      }
+      if (outcome.rewritten.length === 0 && outcome.removed.length === 0 && outcome.failed.length === 0) continue;
+      const problem = outcome.failed.length > 0 ? `, and it reported a problem with ${counted(outcome.failed.length, 'body', 'bodies')}` : '';
+      const owed = outcome.outcome === 'owed' ? ` ${outcome.name} is still owed here: \`${command} ${outcome.name} --write\` asks again.` : '';
+      lines.push(`- ${agent}'s pass also applied sweep ${outcome.name}, which the store took before: it rewrote ${did}${problem}.${owed}`);
     }
   }
   return lines;
@@ -253,8 +274,11 @@ function passLines(passes: readonly AgentSweepPass[], name: string): string[] {
  * What each agent dropped at its own pass. A pass of another agent on the same slot can drop an agent's summaries before
  * its own pass runs, and no report counts those, so where the show before the write counted more, the line says both.
  */
-export function passDrops(passes: readonly AgentSweepPass[], shown: readonly AgentWriteDrops[], _name: string): string[] {
-  return passes.flatMap(({ agent, report: { dropped } }) => {
+export function passDrops(passes: readonly AgentSweepPass[], shown: readonly AgentWriteDrops[], name: string): string[] {
+  return passes.flatMap(({ agent, report: { dropped, sweeps } }) => {
+    const every = sweeps.some((each) => each.name !== name && (each.rewritten.length > 0 || each.removed.length > 0))
+      ? ', for every sweep it applied'
+      : '';
     if (dropped === null) return [`- What ${agent}'s pass dropped is not known: its report doesn't say.`];
     const count = total(dropped.summaries);
     const forecast = total(shown.find((each) => each.agent === agent)?.drops.summaries ?? []);
@@ -264,7 +288,7 @@ export function passDrops(passes: readonly AgentSweepPass[], shown: readonly Age
       : '';
     if (count === 0) return more === '' ? [] : [`- ${agent} dropped no summary at its own pass.${more}`];
     return [
-      `- ${agent} dropped ${counted(count, 'summary', 'summaries')} at its own pass (${levelsOf(dropped.summaries)}): its ` +
+      `- ${agent} dropped ${counted(count, 'summary', 'summaries')} at its own pass${every} (${levelsOf(dropped.summaries)}): its ` +
         `compression folds ${counted(dropped.records, 'chunk record', 'chunk records')} again, and until it has, ` +
         `${heldInFull(agent, dropped)}.${more}`,
     ];
@@ -340,7 +364,14 @@ function windowOf(agents: readonly string[]): string {
 }
 
 export function textOf(content: readonly StoredContentBlock[]): string {
-  return content.map((block) => (block.type === 'text' ? block.text : `[${block.type}]`)).join('\n');
+  return content.map((block) => {
+    if (block.type === 'text') return block.text;
+    if (block.type !== 'tool_result') return `[${block.type}]`;
+    const inner = typeof block.content === 'string'
+      ? block.content
+      : block.content.map((each) => (each.type === 'text' ? each.text : `[${each.type}]`)).join('\n');
+    return `[tool_result] ${inner}`;
+  }).join('\n');
 }
 
 function namesOf(entries: ReadonlyArray<{ name: string }>): string {
