@@ -62,6 +62,7 @@ import { retrievalModuleConfig } from './retrieval-config.js';
 import { FetchModule, fetchModuleConfig } from './modules/fetch-module.js';
 import { TuiModule } from './modules/tui-module.js';
 import { TimeModule } from './modules/time-module.js';
+import { AboutModule } from './modules/about-module.js';
 import { waitToBeListed } from './fleet-begin.js';
 import { FleetModule, type FleetModuleConfig } from './modules/fleet-module.js';
 import { ActivityModule } from './modules/activity-module.js';
@@ -85,7 +86,7 @@ import { createPipedTurns, switchFollowing, traceFollower } from './piped-turns.
 import { openReadlineTerminal, type ReadlineTerminal, type ShownPrompt } from './readline-terminal.js';
 import { opsAlertLine, opsAlertOf, type OpsAlertEntry } from './state/ops-alerts.js';
 import { TURN_SETTLED_TRACES } from './state/turn-trace.js';
-import { setCallLogPath } from './bug-report.js';
+import { readHostVersions, setCallLogPath, type HostVersions } from './bug-report.js';
 import { SessionManager } from './session-manager.js';
 import { startFramework } from './start-framework.js';
 import { StartRefusal, currentForStart, releaseHere, type ReleaseHere } from './update/host.js';
@@ -121,7 +122,7 @@ import { probeAccountBinding } from './thinking-binding-probe.js';
 import { buildFrameworkStrategy, buildConversationsConfig, dendriteCreateOptions } from './framework-strategy.js';
 import { holdBootTraces, type BootTraceHold } from './boot-traces.js';
 import { AUDIT_STORES_FLAG, auditStoresFromEntry, checkActiveStore, placesOnTrial } from './update/audit-stores.js';
-import { buildWorkspaceMounts } from './workspace-mounts.js';
+import { workspaceConfig } from './workspace-mounts.js';
 import { quarantineAlarm, type QuarantineStatus } from './web/quarantine-alert.js';
 import { wireLoadRepairAlert } from './web/load-repair-alert.js';
 import { logKeepaliveEvent } from './cache-keepalive-log.js';
@@ -258,6 +259,8 @@ let instructionsRef: InstructionsModule | null = null;
 let installHere: ReleaseHere | null = null;
 let terminalAsker: SecretAsker | null = null;
 
+let startedWith: HostVersions | null = null;
+
 async function createFramework(
   membrane: Membrane,
   storePath: string,
@@ -276,7 +279,8 @@ async function createFramework(
 
   const extensionRegistry = extensions ?? await loadExtensions(recipe);
 
-  const moduleInstances: Module[] = [new TuiModule(), new TimeModule(timeZone), settingsModule];
+  const aboutModule = new AboutModule(startedWith ??= readHostVersions());
+  const moduleInstances: Module[] = [new TuiModule(), new TimeModule(timeZone), settingsModule, aboutModule];
 
   let subagentModule: SubagentModule | null = null;
   if (modules.subagents) {
@@ -350,9 +354,9 @@ async function createFramework(
   const gateOptions = gateOptionsFor(modules.wake, storePath);
 
   let workspaceModule: WorkspaceModule | null = null;
-  const workspaceMounts = buildWorkspaceMounts(modules.workspace, storePath);
-  if (workspaceMounts) {
-    workspaceModule = new WorkspaceModule({ mounts: workspaceMounts });
+  const workspaceSettings = workspaceConfig(modules.workspace, storePath);
+  if (workspaceSettings) {
+    workspaceModule = new WorkspaceModule(workspaceSettings);
     moduleInstances.push(workspaceModule);
   }
 
@@ -593,6 +597,8 @@ agents: [agentConfig],
 
     wireLoadRepairAlert(strategy, framework, agentName, storePath);
   }
+
+  aboutModule.setFramework(framework);
 
   if (subagentModule) {
     subagentModule.setFramework(framework);
@@ -917,6 +923,7 @@ async function main() {
   if (process.argv[2] === AUDIT_STORES_FLAG) {
     process.exit(await auditStoresFromEntry(process.argv.slice(3)));
   }
+  startedWith = readHostVersions();
   await waitToBeListed();
   installHere = releaseHere();
   if (installHere !== null) armTrialLog(installHere);
