@@ -251,7 +251,7 @@ function writeAnswer(write: FrameworkSweepWrite, shown: readonly AgentWriteDrops
   ]);
 }
 
-function passLines(passes: readonly AgentSweepPass[], name: string, command: string): string[] {
+export function passLines(passes: readonly AgentSweepPass[], name: string, command: string): string[] {
   const lines: string[] = [];
   for (const { agent, report } of passes) {
     for (const outcome of report.sweeps) {

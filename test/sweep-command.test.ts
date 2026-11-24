@@ -7,7 +7,7 @@ import { AutobiographicalStrategy } from '@animalabs/context-manager';
 import type { ContextManager, ContextStrategy, MessageId, StoredContentBlock, SweepEntry } from '@animalabs/context-manager';
 import type { NormalizedRequest, NormalizedResponse, StreamEvent, YieldingStream } from '@animalabs/membrane';
 import { createBranchState, handleCommand, type CommandResult } from '../src/commands.js';
-import { forecastLines, passDrops, textOf as bodyText } from '../src/sweep-command.js';
+import { forecastLines, passDrops, passLines, textOf as bodyText } from '../src/sweep-command.js';
 import { sweepAsk } from '../src/sweep-words.js';
 
 // The sweep's door in the host: /sweep asks the framework's sweep verbs and
@@ -578,6 +578,15 @@ test('after a write, an agent whose own pass dropped none where its show counted
       'slot can drop an agent\'s summaries before its own pass runs.',
   ]);
   expect(passDrops([{ agent: 'b', report }], [], 'n')).toEqual([]);
+});
+
+test('after a write, another owed sweep whose pass had a problem and rewrote nothing still gets its line', () => {
+  const older = { name: 'older', take: 't0', outcome: 'owed' as const, rewritten: [], removed: [], failed: [{ id: 'm1', error: 'Error: no' }] };
+  const report = { slot: 's', branch: 'main', sweeps: [older], stopped: null, unreadable: { items: [], takes: [] }, dropped: null };
+  expect(passLines([{ agent: 'a', report }], 'n', 'connectome sweep')).toEqual([
+    "- a's pass also applied sweep older, which the store took before: it rewrote 0 bodies, and it reported a problem with 1 body. " +
+      'older is still owed here: `connectome sweep older --write` asks again.',
+  ]);
 });
 
 test('after a write, a drop of a pass that also applied another sweep is said to be for every sweep it applied', () => {
