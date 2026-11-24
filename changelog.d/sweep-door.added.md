@@ -11,8 +11,9 @@
     write does and does not do, and what a sweep does not reach.
   - `--write` takes the sweep for the whole store and applies it.
     `connectome sweep` exits 0 when the open branch has finished the sweep,
-    and 1 when a body was not rewritten. It exits 3 when a turn was alive,
-    so that the host applies the sweep later.
+    and 1 when a body had a problem during the pass, which it names with
+    the pass's reason. It exits 3 when a turn was alive, so that the host
+    applies the sweep later.
   - A write keeps each summary that was made from a body while the body held
     its old text, and such a summary can still hold words of that text.
     `--summaries <agent>` gives what dropping that agent's old summaries would

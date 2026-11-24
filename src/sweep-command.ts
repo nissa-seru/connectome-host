@@ -242,7 +242,7 @@ function writeAnswer(write: FrameworkSweepWrite, shown: readonly AgentWriteDrops
     `${took}, and the open branch has not finished it.`,
     ...passes,
     ...drops,
-    `${counted(write.failed.length, 'body was', 'bodies were')} not rewritten:`,
+    `${counted(write.failed.length, 'body', 'bodies')} had a problem during the pass:`,
     ...write.failed.map((failure) => `- Body ${failure.id}: ${failure.error}`),
     ...threw,
     `The sweep stays owed here: the host asks again at its next start and at a branch move, and so does \`${command} ${name} ` +
