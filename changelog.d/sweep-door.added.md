@@ -18,6 +18,11 @@
     `--summaries <agent>` gives what dropping that agent's old summaries would
     cost. With `--write`, it drops them, and the agent then summarizes those
     rows again from their new text.
+  - A write that joins a long note drops that note's summaries at once,
+    with each summary made from them. Before a write, the show counts that
+    drop for each agent, and names each agent whose turn can wait until its
+    compression has folded those rows again. After a write, the answer says
+    what each agent dropped at its own pass.
   - When no host answers, `connectome sweep` lists nothing and exits 1.
   - The host's `ready` event carries `sweep: true`. A write that the store
     applies later ends with a `command-done` that carries `held: true`.
