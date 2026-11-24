@@ -146,7 +146,7 @@ function beforeAWrite(show: FrameworkSweepShow, name: string, command: string): 
       : [
           `- The write joins a long note: it drops ${counted(joined, 'summary', 'summaries')} of that note at once, and each ` +
             'summary made from them.',
-          '- A resident\'s turn can wait until its compression has folded those rows again.',
+          waitLine(show.writeDrops.filter((each) => total(each.drops.summaries) > 0).map((each) => each.agent)),
           '- The same happens on each other branch when the host moves to it, and nobody is shown a count there.',
         ]),
     '- The write does not change an old summary: a summary that an agent\'s memory made from a listed body while the body ' +
@@ -157,8 +157,8 @@ function beforeAWrite(show: FrameworkSweepShow, name: string, command: string): 
 }
 
 const SECOND_ACT = 'The second act drops one agent\'s old summaries, and each summary made from them. That agent\'s memory then ' +
-  'summarizes those rows again from their new text. Until it has, the rows take their full room in its context, and its ' +
-  'turn can wait for that room.';
+  'summarizes those rows again from their new text. Until it has, its context holds those rows in full, and its turn can ' +
+  'wait until then.';
 
 /** What an old summary is, and what the second act does, where an answer counts old summaries. */
 function oldSummariesSaid(name: string, command: string): string[] {
@@ -249,8 +249,7 @@ function passDrops(passes: readonly AgentSweepPass[]): string[] {
     if (count === 0) return [];
     return [
       `- ${agent}'s pass dropped ${counted(count, 'summary', 'summaries')} (${levelsOf(dropped.summaries)}): its compression ` +
-        `folds ${counted(dropped.records, 'chunk record', 'chunk records')} again, and until it has, about ` +
-        `${dropped.rawTokens.toLocaleString('en-US')} tokens of rows take their full room in ${agent}'s context.`,
+        `folds ${counted(dropped.records, 'chunk record', 'chunk records')} again, and until it has, ${heldInFull(agent, dropped)}.`,
     ];
   });
 }
@@ -262,9 +261,8 @@ function costLines(cost: SummaryDropCost, name: string, agent: string, command: 
     `The second act of sweep ${name} for ${agent} would drop ${counted(dropping, 'old summary', 'old summaries')}, made ` +
       `while a rewritten body held its old text: ${levelsOf(cost.summaries)}.`,
     `${agent}'s memory would then summarize those rows again from their new text, in ` +
-      `${counted(cost.records, 'chunk record', 'chunk records')}. Until it has, about ` +
-      `${cost.rawTokens.toLocaleString('en-US')} tokens of rows take their full room in ${agent}'s context, and where they ` +
-      `don't fit ${agent}'s budget, ${agent}'s turn waits for that room.`,
+      `${counted(cost.records, 'chunk record', 'chunk records')}. Until it has, ${heldInFull(agent, cost)}, and ${agent}'s turn ` +
+      'can wait until then.',
     `Nothing is written. \`${command} ${name} --summaries ${agent} --write\` makes it, while every agent is between turns.`,
   ];
 }
@@ -276,10 +274,21 @@ function droppedLines(dropped: SummaryDropCost, name: string, agent: string): st
     `The second act of sweep ${name} for ${agent} dropped ${counted(count, 'old summary', 'old summaries')}: ` +
       `${levelsOf(dropped.summaries)}.`,
     `${agent}'s memory now summarizes those rows again from their new text, in ` +
-      `${counted(dropped.records, 'chunk record', 'chunk records')}. Until it has, about ` +
-      `${dropped.rawTokens.toLocaleString('en-US')} tokens of rows take their full room in ${agent}'s context, and ${agent}'s ` +
-      'turn can wait for that room.',
+      `${counted(dropped.records, 'chunk record', 'chunk records')}. Until it has, ${heldInFull(agent, dropped)}, and ` +
+      `${agent}'s turn can wait until then.`,
   ];
+}
+
+/** The rows that a drop leaves raw: the text that compression folds again, which is not how much the context grows. */
+function heldInFull(agent: string, cost: SummaryDropCost): string {
+  return `${agent}'s context holds about ${cost.rawTokens.toLocaleString('en-US')} tokens of rows in full`;
+}
+
+/** Rule 10's line for the residents whose write drops a summary. */
+function waitLine(agents: readonly string[]): string {
+  return agents.length === 1
+    ? `- ${agents[0]}'s turn can wait until its compression has folded those rows again.`
+    : `- The turns of ${listed(agents)} can wait until their compression has folded those rows again.`;
 }
 
 function summariesOf(agents: readonly AgentOldSummaries[]): string {
@@ -297,8 +306,7 @@ function dropsOf(agents: readonly AgentWriteDrops[]): string {
     return count === 0
       ? `${agent}: none`
       : `${agent}: ${count} (${levelsOf(drops.summaries)}), and its compression folds ` +
-        `${counted(drops.records, 'chunk record', 'chunk records')} again, with about ${drops.rawTokens.toLocaleString('en-US')} ` +
-        'tokens of rows taking their full room until it has';
+        `${counted(drops.records, 'chunk record', 'chunk records')} again; until it has, ${heldInFull(agent, drops)}`;
   }).join('; ');
 }
 
