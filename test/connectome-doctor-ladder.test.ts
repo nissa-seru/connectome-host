@@ -981,7 +981,7 @@ describe.skipIf(ladderUnrunnable)('the ladder\'s data directory', () => {
     mkdirSync(join(at.work, 'data', 'sessions', 's-bare'));
     writeFileSync(index, JSON.stringify({ activeSessionId: 's-bare', sessions: {} }));
     const bare = ladder(at).out;
-    expect(bare).toMatch(/· chronicle ingest \(\+gate\) +can't be seen here: .*the active session's store, \S*sessions\/s-bare, is there without a records\.log, which the host writes when it opens the store, so what was ingested isn't known/);
+    expect(bare).toMatch(/· chronicle ingest \(\+gate\) +can't be seen here: .*the active session's store, \S*sessions\/s-bare, is there without a records\.log, so what was ingested isn't known/);
     expect(bare).not.toContain('#other-room');
     writeFileSync(index, '{ not json');
     const unread = ladder(at).out;

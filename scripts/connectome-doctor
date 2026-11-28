@@ -298,8 +298,8 @@ if os.path.lexists(session_index):
                 store = os.path.join(sessions_dir, active_session)
                 if os.path.lexists(store):
                     ingest_unknown = True
-                    rec_detail = (f"the active session's store, {store}, is there without a records.log, which the host "
-                                  "writes when it opens the store, so what was ingested isn't known")
+                    rec_detail = (f"the active session's store, {store}, is there without a records.log, so what was "
+                                  "ingested isn't known")
                 else:
                     rec_detail = f"the active session, {active_session}, has no records.log"
             except OSError as e:
