@@ -12,28 +12,32 @@
     back to the release before this one. chronicle 0.7.1's
     `tools/compact-set-states.py` refuses a `state.bin` that holds those
     checks.
-  - **The first use of a store that 0.7 wrote:** chronicle 0.8.0 reads each
-    list in the store whole once, at the list's first use, to check its count.
-    A store's first sync also syncs its directories, including those of its
-    blobs. An open now fsyncs the log before it returns. The store audit
-    before an update opens and closes each store, so it meets these costs too.
-    On macOS, chronicle's changelog says that the cost of the directory syncs
-    on a Mac's own disk isn't measured.
-  - **What a resident meets, from agent-framework 0.35.4 and 0.36.0:** an
-    over-long tool result keeps its tail as well as its head, and a reply cut
-    at the output limit gets an `[output-limit]` note. When the provider
-    refuses a turn's last call as `reasoning_extraction` and no rewind takes
-    it, the turn leaves an `[inference-failed]` note. A held draft that the
-    resident leaves alone through a whole turn is set aside when that turn
-    ends. When a send fails in the same round as `skip_reply`, the resident
-    sees the failure before its turn ends. An MCPL server with no grant leaves
-    a `[no-grant]` notice. `history--extract` leaves out private thinking that
-    it can recognize. The new tool descriptions of `drafts` and
-    `history--extract` can cost each resident one prompt-cache miss after the
-    update.
+  - **What chronicle 0.8.0's checks cost:** in a store that an earlier release
+    wrote, chronicle 0.8.0 reads each list whole once, at the list's first
+    use, to check its count. Each open now fsyncs the log before it returns.
+    On Unix, the first `sync()` or close of each open store also syncs the
+    store's directory, `blobs/` and each shard directory, and the directories
+    that hold the store. The store audit before an update opens and closes
+    each store, so it meets these costs too. A fleet child's audit stops after
+    5 minutes, unless `CONNECTOME_FLEET_CHILD_AUDIT_MINUTES` gives more. On
+    macOS, chronicle's changelog says that the cost of the directory syncs on
+    a Mac's own disk isn't measured.
+  - **What a resident meets** is in agent-framework's changelog for 0.35.4 and
+    0.36.0. It covers an over-long tool result, which keeps its tail as well
+    as its head, the new `[output-limit]`, `[inference-failed]` and
+    `[no-grant]` notes, held drafts that are set aside, and a failed send in
+    the same round as `skip_reply`. `history--extract` leaves out private
+    thinking that it can recognize.
+  - **Prompt cache:** the new tool descriptions of `drafts` and
+    `history--extract` can cost each resident that has those tools one
+    prompt-cache miss after the update.
   - **Piped mode** can print two lines for one event: agent-framework 0.36.0
     writes its own stderr line when a deadline cuts a call that it will retry,
     and when a stop ends a turn in that wait or cancels its stream.
   - **Recipes:** the built-in autobiographical and frontdesk strategies don't
     pass context-manager 0.29.0's `compressionInstructions` on from a recipe.
     A custom strategy's factory still gets the recipe's strategy keys whole.
+  - **The Web UI's quarantine alert:** when the compression quarantine
+    empties, it now says "compression quarantine EMPTY; alarm stands down." It
+    no longer says that all debt is paid, since context-manager 0.29.0 says
+    that an empty quarantine is not evidence of paid debt.

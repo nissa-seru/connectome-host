@@ -2069,8 +2069,7 @@ export class SubagentModule implements Module {
     let lastMessageSnippet = '';
     try {
       // A dry compile: unlike a real one, it commits none of the stream's fold
-      // state, queues no compression, and returns a plan over the budget it
-      // compiles at rather than refusing it.
+      // state and queues no compression.
       const compiled = await live.contextManager.compile(undefined, undefined, { dryRun: true });
       const said = compiledWithoutStoredInjections(compiled);
       messageCount = said.length;
@@ -3319,10 +3318,8 @@ export class SubagentModule implements Module {
           storeOwnRow(agent, 'user', [{ type: 'text', text: orientation }]);
           storeOwnRow(agent, 'user', [{ type: 'text', text: input.task }]);
 
-          // A real compile, not a dry one: a dry compile returns an
-          // over-budget plan where a real one refuses it, and the stream's
-          // context is fresh, so its first request's compile starts from what
-          // this one leaves.
+          // A real compile, not a dry one: the stream's context is fresh, so
+          // its first request's compile starts from what this one leaves.
           const { messages } = await Promise.race([contextManager.compile(), cancel.promise]);
           cancel.throwIfFired();
           const delivery: LaunchDelivery = { kind: 'message', orientation, taskBlock: input.task };

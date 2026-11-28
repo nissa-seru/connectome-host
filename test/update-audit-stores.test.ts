@@ -322,14 +322,18 @@ describe('the store audit', () => {
         if (kind === 'lost') fs.rmSync(join(store, 'records.log'));
         else fs.writeFileSync(join(store, 'records.log'), '');
       }]);
-      const before = fs.readdirSync(stores[0]!).sort().map((name) => [name, fs.statSync(join(stores[0]!, name)).size]);
+      const files = (dir: string) => fs.readdirSync(dir, { recursive: true }).map(String).sort().map((entry) => {
+        const path = join(dir, entry);
+        return fs.statSync(path).isFile() ? `${entry}: ${fs.readFileSync(path, 'hex')}` : `${entry}/`;
+      });
+      const before = files(stores[0]!);
       const { status, lines, failed } = await audit([dir]);
       expect(status).toBe(1);
       expect(lines).toEqual(failed);
       expect(failed).toHaveLength(1);
       expect(failed[0]).toStartWith(`${stores[0]} (agents/agent): refused: `);
       expect(failed[0]).toContain(`${join(stores[0]!, 'records.log')} ${words}`);
-      expect(fs.readdirSync(stores[0]!).sort().map((name) => [name, fs.statSync(join(stores[0]!, name)).size])).toEqual(before);
+      expect(files(stores[0]!)).toEqual(before);
     });
   }
 
