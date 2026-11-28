@@ -652,8 +652,8 @@ a typo fails at boot rather than silently disabling the rung.
    clear. It is another model writing a memory in the agent's voice, so mention
    it to the user as you would a `compressionModel` that isn't the agent's own
    (AGENT-ONBOARDING's "Compression needs a model that keeps answering"). It
-   takes context-manager 0.28.0, which this host's
-   `@animalabs/context-manager` range starts at.
+   came in context-manager 0.28.0, and this host's
+   `@animalabs/context-manager` range starts above it.
 
 7. **`thinking.display: "summarized"`** — rendered thinking *text* (the 💭 summaries
    some UIs emit) inside the transcript can itself trip refusals; never store it.

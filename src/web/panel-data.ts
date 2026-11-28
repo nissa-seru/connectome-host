@@ -1269,10 +1269,11 @@ function curveVerdict(
  * cooldown isn't applied. A dry run commits no fold resolutions, queues no
  * compression, and leaves the hot settings, calibration and render stats
  * as the last committing compile left them; as any compile does, it
- * releases a compression hold whose deadline has passed. It skips only
- * context-manager's post-pick check, so a plan over budget there is
- * plotted beside the verdict, while a budget the context can't fit at all
- * still throws. No inference of its own, no message writes.
+ * releases a compression hold whose deadline has passed. Under adaptive
+ * resolution it meets context-manager's plan check as a committing compile
+ * does, so a plan over the budget throws, as does a budget the context
+ * can't fit at all. No inference of its own, no message
+ * writes.
  */
 export async function buildContextCurve(app: PanelAppRef, agentName: string): Promise<Record<string, unknown>> {
   requireAgent(app, agentName);

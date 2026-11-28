@@ -3523,8 +3523,9 @@ export class SubagentModule implements Module {
           if (parentAgent) {
             const parentCM = parentAgent.getContextManager();
             // A dry compile: unlike a real one, it commits none of the
-            // parent's fold state, queues no compression on its behalf, and
-            // returns a plan over the budget rather than refusing it.
+            // parent's fold state and queues no compression on its behalf.
+            // Under adaptive resolution it refuses a plan over the budget, as
+            // a real one does.
             const compiled = compiledWithoutStoredInjections(await Promise.race([
               parentCM.compile(undefined, undefined, { dryRun: true }),
               cancel.promise,

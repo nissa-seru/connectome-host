@@ -29,8 +29,8 @@ const heldToTheirPackages: [
   Same<RefusalHandling['autoRewind'], NonNullable<AgentConfig['refusalHandling']>['autoRewind'] | null>,
   Holds<NonNullable<RecipeAgent['thinking']>, NonNullable<AgentConfig['thinking']>, 'effort'>,
   Holds<RecipeStrategy, AutobiographicalOptions, 'type', 'attachmentsIgnoreSize' | 'auditOnly' | 'autoTickOnNewMessage'
-    | 'chunkOnMessageBoundary' | 'compressionCacheMarkers' | 'compressionCacheTtl' | 'diarySystemPrompt' | 'diaryUserPrompt'
-    | 'hierarchical' | 'imageByteCeiling' | 'imageCeiling' | 'imageStripHysteresisRatio' | 'logEffectiveConfig'
+    | 'chunkOnMessageBoundary' | 'compressionCacheMarkers' | 'compressionCacheTtl' | 'compressionInstructions' | 'diarySystemPrompt'
+    | 'diaryUserPrompt' | 'hierarchical' | 'imageByteCeiling' | 'imageCeiling' | 'imageStripHysteresisRatio' | 'logEffectiveConfig'
     | 'maxCompressionImageBytes' | 'mergeAttemptLimit' | 'mergeContiguityGapLimit' | 'mergeHoldSummaryIds' | 'minChunkCharsForLLM'
     | 'persistMintPreimages' | 'quarantineAlarmIntervalMs' | 'recallEnvelope' | 'topologyPolicy'>,
   Holds<RecipeWorkspaceMount, MountConfig, never, never, 'mode'>,

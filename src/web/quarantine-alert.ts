@@ -45,7 +45,7 @@ export function quarantineAlarm(status: QuarantineStatus): { kind: string; messa
   if (status.count === 0) {
     return {
       kind: 'compression-quarantine-clear',
-      message: 'compression quarantine EMPTY — all debt paid; alarm stands down.',
+      message: 'compression quarantine EMPTY; alarm stands down.',
       data: { count: 0 },
     };
   }

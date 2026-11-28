@@ -77,7 +77,7 @@ describe('quarantineAlarm', () => {
   test('none held: the all-clear, under its own kind', () => {
     expect(quarantineAlarm({ count: 0, keys: [] })).toEqual({
       kind: 'compression-quarantine-clear',
-      message: 'compression quarantine EMPTY — all debt paid; alarm stands down.',
+      message: 'compression quarantine EMPTY; alarm stands down.',
       data: { count: 0 },
     });
     expect(quarantineAlarm({ count: 0, keys: [], spans: [] }).kind).toBe('compression-quarantine-clear');

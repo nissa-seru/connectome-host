@@ -132,7 +132,7 @@ export const HOST_LOG_TAGS = new Set([
   'credential', 'credential-monitor', 'deprecated', 'diagnostics', 'discord', 'discord-awareness', 'echo',
   'estimator-calibration', 'fit', 'fleet', 'framework', 'gate', 'gate-telemetry', 'heartbeat', 'host', 'host-command',
   'host-mode', 'host-notice', 'identity', 'image', 'inference-dropped', 'inference-failed',
-  'inference-hard-down', 'inference-refusal', 'inference-rewind', 'inference-stale', 'interrupt',
+  'inference-hard-down', 'inference-refusal', 'inference-rewind', 'inference-stale', 'inference-timeout', 'interrupt',
   'kv-continuity-relaxation', 'kv-diag', 'kv-escalation', 'kv-overlap', 'kv-timing', 'kv-unified',
   'lessons', 'liveness-watchdog', 'llm-calls', 'mcp', 'mcpl', 'membrane', 'membrane-oversize', 'membrane:bedrock',
   'membrane:content', 'membrane:cost', 'membrane:gemini', 'membrane:normalize-tool-pairs',
@@ -142,7 +142,7 @@ export const HOST_LOG_TAGS = new Set([
   'provider-cooldown', 'puppet', 'push-event-rejected', 'reasoning', 'reasoning-effort', 'refusal-retry',
   'refusal-rewind', 'rfc005', 'routespeech', 'routing', 'section', 'self-restart', 'self-wake', 'settings', 'shutdown',
   'sleep', 'spill', 'store-topology', 'subagent', 'subscription-gc', 'thinking', 'thinking-binding', 'tool', 'tool-boundary',
-  'tool-result-guard', 'tool_result', 'tools', 'tts-relay', 'unstick', 'update', 'voice', 'webui', 'webui-observers',
+  'tool-result-guard', 'tool_result', 'tools', 'tts-relay', 'turn', 'unstick', 'update', 'voice', 'webui', 'webui-observers',
   'windowed-passthrough', 'workspace',
 ]);
 
