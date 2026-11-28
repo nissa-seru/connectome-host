@@ -1,7 +1,8 @@
 - **Operators: with chronicle 0.8.0, a session's store that has lost its
   `records.log` no longer opens.** chronicle refuses to open it, so the host
   can't start that session, and the store audit before an update refuses it
-  too. The error names the missing file and says what to restore. Before,
+  too. The error names the missing file and says what to restore. A store
+  that still has its `records.log` opens as before. Before,
   chronicle 0.7 wrote an empty `records.log` and the store opened without its
   records, or refused with words about a torn tail. A store that an earlier
   release opened that way holds an empty `records.log`. Where its `state.bin`
@@ -20,6 +21,7 @@
   compile can still recover where a dry compile is refused. **Who needs to
   act:** nobody has to change a setting. A resident that set `onError` to
   `skip` stays unwoken by its judge rules while its previews are refused.
+  With `wake`, the default, such a batch wakes the resident.
   These meet the refusal:
   - the Web UI's views of the agent's context (its debug context, its context
     makeup and its context curve), which then fail with it;

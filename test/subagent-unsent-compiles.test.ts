@@ -1,7 +1,8 @@
 /**
  * context-manager's dry compile (SelectOptions.dryRun) commits nothing a later
  * compile or an observer reads, though it releases a compression hold past its
- * deadline, and it returns an over-budget plan where a real compile refuses it.
+ * deadline, and on a strategy without adaptive resolution, as a subagent's is,
+ * it returns an over-budget plan where a real compile refuses it.
  */
 import { describe, test, expect } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';

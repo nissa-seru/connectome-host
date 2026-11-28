@@ -16,7 +16,10 @@ type Holds<Host, Package, HostOnly extends PropertyKey = never, PackageOnly exte
   Exclude<keyof Host, keyof Package | HostOnly>,
   Exclude<keyof Package, keyof Host | PackageOnly>,
   { [K in Exclude<keyof Host & keyof Package, Differs>]-?: Same<Pick<Host, K>, Pick<Package, K>> extends true ? never : K }[Exclude<keyof Host & keyof Package, Differs>],
-] extends [never, never, never] ? true : false;
+  Exclude<HostOnly, keyof Host>,
+  Exclude<PackageOnly, keyof Package>,
+  Exclude<Differs, keyof Host & keyof Package>,
+] extends [never, never, never, never, never, never] ? true : false;
 
 type ObjectArm<T> = Extract<NonNullable<T>, object>;
 type RefusalHandling = ObjectArm<RecipeAgent['refusalHandling']>;

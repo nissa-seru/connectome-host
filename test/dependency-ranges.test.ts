@@ -103,7 +103,7 @@ const within = (inner: string, outer: string): boolean =>
   Bun.semver.satisfies(floorOf(inner), outer) && Bun.semver.satisfies(topOf(inner), outer);
 
 describe("the host's dependency ranges (#291's release set)", () => {
-  test("takes agent-framework from 0.36.0, the first that takes context-manager 0.29.0 and admits chronicle 0.8.0: not 0.35.3 or 0.35.4, the first whose workspace takes outsideMounts, nor 0.35.2, the first whose listMcplServers rows carry each server's serverInfo, nor 0.35.1, the first whose sameRoundSkipReplyTextPolicy 'ask' holds text on the XML tool path and which agent_settings switches, nor 0.35.0, the first with sendSilencing and primaryWaitsForAuxiliary", () => {
+  test("takes agent-framework from 0.36.0, the first that takes context-manager 0.29.0 and admits chronicle 0.8.0: not 0.35.4, nor 0.35.3, the first whose workspace takes outsideMounts, nor 0.35.2, the first whose listMcplServers rows carry each server's serverInfo, nor 0.35.1, the first whose sameRoundSkipReplyTextPolicy 'ask' holds text on the XML tool path and which agent_settings switches, nor 0.35.0, the first with sendSilencing and primaryWaitsForAuxiliary", () => {
     const range = ours.dependencies?.['@animalabs/agent-framework'];
     for (const published of ['0.29.0', '0.30.0', '0.31.0', '0.32.0', '0.33.0', '0.33.1', '0.33.2', '0.33.3', '0.34.0', '0.35.0', '0.35.1', '0.35.2', '0.35.3', '0.35.4']) expect(Bun.semver.satisfies(published, range!)).toBe(false);
     expect(floorOf(range!)).toBe('0.36.0');

@@ -122,7 +122,8 @@ document.getElementById('meta').textContent =
   'branch ' + payload.branch + ' · compiled ' + payload.generatedAt.slice(0, 16).replace('T', ' ') +
   'Z · budget ' + Math.round(payload.budget.maxTokens / 1000) + 'k (hard ' +
   Math.round((payload.budget.maxTokens - payload.budget.reserveForResponse) / 1000) + 'k)' +
-  // A dry compile plots a plan that won't fit instead of failing, so say so.
+  // A dry compile can return a plan over the requested budget, so say so.
+  // Under adaptive resolution, one over the hard budget throws instead.
   (V && V.fitsRequested === false && typeof V.plannedTokens === 'number'
     ? ' · OVER BUDGET' + (V.atDescentTarget ? " at the descent's target" : '') + ': plan ' +
       Math.round(V.plannedTokens / 1000) + 'k > ' + Math.round(V.effectiveBudgetTokens / 1000) + 'k' +

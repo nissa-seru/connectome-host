@@ -71,6 +71,14 @@ function makeRealStore(dir: string): void {
   JsStore.openOrCreate({ path: dir }).close();
 }
 
+function makeUsedStore(dir: string): void {
+  const store = JsStore.create({ path: dir });
+  store.registerState({ id: 'messages', strategy: 'append_log' });
+  store.appendToStateJson('messages', { text: 'a message' });
+  store.sync();
+  store.close();
+}
+
 const startWords = (session: { name: string; id: string }, dir: string, reason: string) =>
   `Session "${session.name}" [${session.id}] wasn't started: its store directory, ${dir}, is there, and no store ` +
   `opened in it (${reason}). Nothing was written there. If that directory is on a volume, check that the volume ` +
@@ -128,6 +136,26 @@ describe('a start', () => {
       const { exitCode, stderr, reachedSocket } = await start(data);
 
       expect(stderr).toBe(`${startWords(session, dir, reason)}\n`);
+      expect(exitCode).toBe(1);
+      expect(reachedSocket).toBe(false);
+      expect(contents(dir)).toEqual(before);
+    }, 60_000);
+  }
+
+  for (const [kind, words] of [['lost', 'is missing'], ['emptied', 'is empty']] as const) {
+    test(`on a session whose used store has its records.log ${kind} is refused with chronicle's words, and nothing is written there`, async () => {
+      const data = join(root, 'data');
+      const sessions = new SessionManager(data);
+      const session = sessions.createSession();
+      const dir = sessions.getStorePath(session.id);
+      makeUsedStore(dir);
+      if (kind === 'lost') rmSync(join(dir, 'records.log'));
+      else writeFileSync(join(dir, 'records.log'), '');
+      const before = contents(dir);
+
+      const { exitCode, stderr, reachedSocket } = await start(data);
+
+      expect(stderr).toContain(`${join(dir, 'records.log')} ${words}`);
       expect(exitCode).toBe(1);
       expect(reachedSocket).toBe(false);
       expect(contents(dir)).toEqual(before);

@@ -311,6 +311,28 @@ function holdPastParent(release?: string): string[] {
 }
 
 describe('the store audit', () => {
+  for (const [kind, words] of [['lost', 'is missing'], ['emptied', 'is empty']] as const) {
+    test(`a used store whose records.log is ${kind} is refused with chronicle's words, nothing is written to it, and the audit exits 1`, async () => {
+      const { dir, stores } = await makeDataDirWith('data', [async (store) => {
+        const made = JsStore.create({ path: store });
+        made.registerState({ id: 'messages', strategy: 'append_log' });
+        made.appendToStateJson('messages', { text: 'a message' });
+        made.sync();
+        made.close();
+        if (kind === 'lost') fs.rmSync(join(store, 'records.log'));
+        else fs.writeFileSync(join(store, 'records.log'), '');
+      }]);
+      const before = fs.readdirSync(stores[0]!).sort().map((name) => [name, fs.statSync(join(stores[0]!, name)).size]);
+      const { status, lines, failed } = await audit([dir]);
+      expect(status).toBe(1);
+      expect(lines).toEqual(failed);
+      expect(failed).toHaveLength(1);
+      expect(failed[0]).toStartWith(`${stores[0]} (agents/agent): refused: `);
+      expect(failed[0]).toContain(`${join(stores[0]!, 'records.log')} ${words}`);
+      expect(fs.readdirSync(stores[0]!).sort().map((name) => [name, fs.statSync(join(stores[0]!, name)).size])).toEqual(before);
+    });
+  }
+
   test("a store this release would refuse is said, with the host's repair section in place of the library's remedy, and the audit exits 1", async () => {
     const { dir, stores } = await makeDataDir('data', [{ namespace: 'agents/agent', crossed: true }]);
     const { status, lines, failed } = await audit([dir]);
